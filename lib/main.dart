@@ -11,13 +11,13 @@ class VersionaApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Versiona',
+      themeMode: ThemeMode.light,
       theme: ThemeData(
-        colorSchemeSeed: const Color(0xFF3D5AFE),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorSchemeSeed: const Color(0xFF3D5AFE),
-        brightness: Brightness.dark,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF6C8EFF),
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF7F8FC),
         useMaterial3: true,
       ),
       home: const DocumentListScreen(),
