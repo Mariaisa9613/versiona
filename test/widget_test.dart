@@ -1,37 +1,31 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
 import 'package:versiona/main.dart';
+import 'package:versiona/services/secure_storage_service.dart';
+import 'package:versiona/state/auth_controller.dart';
+
+/// Evita tocar canales de plataforma (Keychain/Keystore) durante el test.
+class _FakeSecureStorageService extends SecureStorageService {
+  @override
+  Future<String?> readToken() async => null;
+
+  @override
+  Future<void> saveToken(String token) async {}
+
+  @override
+  Future<void> clearToken() async {}
+}
 
 void main() {
-  testWidgets('Muestra el listado de documentos y abre su historial', (
-    WidgetTester tester,
-  ) async {
-    await tester.pumpWidget(const VersionaApp());
+  testWidgets(
+    'Sin sesión guardada, muestra la pantalla para conectar con GitHub',
+    (tester) async {
+      final auth = AuthController(storage: _FakeSecureStorageService());
 
-    expect(find.text('Versiona'), findsOneWidget);
-    expect(find.text('Informe anual.docx'), findsOneWidget);
+      await tester.pumpWidget(VersionaApp(authController: auth));
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Informe anual.docx'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Añadidos gráficos y conclusiones'), findsOneWidget);
-  });
-
-  testWidgets('El botón flotante añade un nuevo documento', (
-    WidgetTester tester,
-  ) async {
-    await tester.pumpWidget(const VersionaApp());
-
-    final initialTiles = find.byType(ListTile);
-    final initialCount = tester.widgetList(initialTiles).length;
-
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    expect(
-      tester.widgetList(find.byType(ListTile)).length,
-      initialCount + 1,
-    );
-  });
+      expect(find.text('Versiona'), findsOneWidget);
+      expect(find.text('Conectar con GitHub'), findsOneWidget);
+    },
+  );
 }
