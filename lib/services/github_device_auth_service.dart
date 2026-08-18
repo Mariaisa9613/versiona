@@ -35,7 +35,12 @@ enum DevicePollStatus { pending, success, expired, denied, otherError }
 
 /// Resultado de una única comprobación del endpoint de token.
 class DevicePollResult {
-  DevicePollResult._(this.status, {this.token, this.errorMessage, this.retryAfterSeconds});
+  DevicePollResult._(
+    this.status, {
+    this.token,
+    this.errorMessage,
+    this.retryAfterSeconds,
+  });
 
   factory DevicePollResult.success(String token) =>
       DevicePollResult._(DevicePollStatus.success, token: token);
@@ -66,7 +71,7 @@ class DevicePollResult {
 /// Referencia: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow
 class GitHubDeviceAuthService {
   GitHubDeviceAuthService({http.Client? client})
-      : _client = client ?? http.Client();
+    : _client = client ?? http.Client();
 
   final http.Client _client;
 

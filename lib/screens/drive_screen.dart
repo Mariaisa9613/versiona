@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 import '../models/drive_entry.dart';
 import '../state/auth_controller.dart';
 import '../state/drive_controller.dart';
+import '../utils/error_messages.dart';
+import '../widgets/review_status_badge.dart';
 import 'folder_picker_screen.dart';
 import 'version_history_screen.dart';
 
@@ -14,9 +16,10 @@ class DriveScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
-      create: (context) =>
-          DriveController(context.read<AuthController>().driveService!)
-            ..load(),
+      create:
+          (context) =>
+              DriveController(context.read<AuthController>().driveService!)
+                ..load(),
       child: const _DriveView(),
     );
   }
@@ -41,9 +44,13 @@ class _DriveView extends StatelessWidget {
 
     try {
       await drive.uploadFile(file.name, file.bytes!, commitMessage: message);
-    } catch (_) {
+    } catch (e) {
       messenger.showSnackBar(
-        const SnackBar(content: Text('No se pudo subir el fichero.')),
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo subir el fichero.'),
+          ),
+        ),
       );
     }
   }
@@ -54,33 +61,40 @@ class _DriveView extends StatelessWidget {
     final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Nueva carpeta'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Nombre de la carpeta'),
-          onSubmitted: (v) => Navigator.of(context).pop(v),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancelar'),
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Nueva carpeta'),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'Nombre de la carpeta',
+              ),
+              onSubmitted: (v) => Navigator.of(context).pop(v),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(controller.text),
+                child: const Text('Crear'),
+              ),
+            ],
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Crear'),
-          ),
-        ],
-      ),
     );
 
     if (name == null || name.trim().isEmpty) return;
     try {
       await drive.createFolder(name.trim());
-    } catch (_) {
+    } catch (e) {
       messenger.showSnackBar(
-        const SnackBar(content: Text('No se pudo crear la carpeta.')),
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo crear la carpeta.'),
+          ),
+        ),
       );
     }
   }
@@ -91,24 +105,25 @@ class _DriveView extends StatelessWidget {
     final controller = TextEditingController(text: entry.name);
     final newName = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Renombrar'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          onSubmitted: (v) => Navigator.of(context).pop(v),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancelar'),
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Renombrar'),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              onSubmitted: (v) => Navigator.of(context).pop(v),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(controller.text),
+                child: const Text('Renombrar'),
+              ),
+            ],
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Renombrar'),
-          ),
-        ],
-      ),
     );
 
     if (newName == null) return;
@@ -117,9 +132,11 @@ class _DriveView extends StatelessWidget {
 
     try {
       await drive.rename(entry, trimmed);
-    } catch (_) {
+    } catch (e) {
       messenger.showSnackBar(
-        const SnackBar(content: Text('No se pudo renombrar.')),
+        SnackBar(
+          content: Text(describeError(e, fallback: 'No se pudo renombrar.')),
+        ),
       );
     }
   }
@@ -130,10 +147,11 @@ class _DriveView extends StatelessWidget {
 
     final destination = await Navigator.of(context).push<String>(
       MaterialPageRoute(
-        builder: (_) => FolderPickerScreen(
-          entryName: entry.name,
-          excludePath: entry.isFolder ? entry.path : null,
-        ),
+        builder:
+            (_) => FolderPickerScreen(
+              entryName: entry.name,
+              excludePath: entry.isFolder ? entry.path : null,
+            ),
       ),
     );
     if (destination == null) return;
@@ -141,9 +159,11 @@ class _DriveView extends StatelessWidget {
     try {
       await drive.move(entry, destination);
     } catch (e) {
-      final message =
-          e is StateError ? e.message : 'No se pudo mover.';
-      messenger.showSnackBar(SnackBar(content: Text(message)));
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(describeError(e, fallback: 'No se pudo mover.')),
+        ),
+      );
     }
   }
 
@@ -152,34 +172,37 @@ class _DriveView extends StatelessWidget {
     final messenger = ScaffoldMessenger.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Eliminar "${entry.name}"'),
-        content: Text(
-          entry.isFolder
-              ? 'Se eliminará la carpeta y todo su contenido. Seguirá '
-                  'estando disponible en el historial de versiones.'
-              : 'Se eliminará el fichero. Seguirá estando disponible en su '
-                  'historial de versiones.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancelar'),
+      builder:
+          (context) => AlertDialog(
+            title: Text('Eliminar "${entry.name}"'),
+            content: Text(
+              entry.isFolder
+                  ? 'Se eliminará la carpeta y todo su contenido. Seguirá '
+                      'estando disponible en el historial de versiones.'
+                  : 'Se eliminará el fichero. Seguirá estando disponible en su '
+                      'historial de versiones.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Eliminar'),
+              ),
+            ],
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Eliminar'),
-          ),
-        ],
-      ),
     );
 
     if (confirmed != true) return;
     try {
       await drive.deleteEntry(entry);
-    } catch (_) {
+    } catch (e) {
       messenger.showSnackBar(
-        const SnackBar(content: Text('No se pudo eliminar.')),
+        SnackBar(
+          content: Text(describeError(e, fallback: 'No se pudo eliminar.')),
+        ),
       );
     }
   }
@@ -200,40 +223,49 @@ class _DriveView extends StatelessWidget {
           PopupMenuButton<String>(
             icon: CircleAvatar(
               radius: 16,
-              backgroundImage: auth.currentUser?.avatarUrl != null
-                  ? NetworkImage(auth.currentUser!.avatarUrl!)
-                  : null,
-              child: auth.currentUser?.avatarUrl == null
-                  ? const Icon(Icons.person, size: 18)
-                  : null,
+              backgroundImage:
+                  auth.currentUser?.avatarUrl != null
+                      ? NetworkImage(auth.currentUser!.avatarUrl!)
+                      : null,
+              child:
+                  auth.currentUser?.avatarUrl == null
+                      ? const Icon(Icons.person, size: 18)
+                      : null,
             ),
             onSelected: (value) {
               if (value == 'signOut') auth.signOut();
             },
-            itemBuilder: (context) => [
-              PopupMenuItem(
-                enabled: false,
-                child: Text(
-                  auth.isDemoMode
-                      ? 'Cuenta de pruebas compartida'
-                      : auth.currentUser?.login ?? '',
-                ),
-              ),
-              if (!auth.isDemoMode) ...[
-                const PopupMenuDivider(),
-                const PopupMenuItem(
-                  value: 'signOut',
-                  child: Text('Cerrar sesión'),
-                ),
-              ],
-            ],
+            itemBuilder:
+                (context) => [
+                  PopupMenuItem(
+                    enabled: false,
+                    child: Text(
+                      auth.isDemoMode
+                          ? 'Cuenta de pruebas compartida'
+                          : auth.currentUser?.login ?? '',
+                    ),
+                  ),
+                  if (!auth.isDemoMode) ...[
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'signOut',
+                      child: Text('Cerrar sesión'),
+                    ),
+                  ],
+                ],
           ),
           const SizedBox(width: 8),
         ],
       ),
       body: Column(
         children: [
-          _Breadcrumbs(drive: drive),
+          Row(
+            children: [
+              Expanded(child: _Breadcrumbs(drive: drive)),
+              _ViewModeToggle(drive: drive),
+              const SizedBox(width: 12),
+            ],
+          ),
           const Divider(height: 1),
           Expanded(
             child: RefreshIndicator(
@@ -241,14 +273,16 @@ class _DriveView extends StatelessWidget {
               child: _DriveBody(
                 drive: drive,
                 onOpenFolder: (entry) => drive.openFolder(entry),
-                onOpenFile: (entry) => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => ChangeNotifierProvider.value(
-                      value: drive,
-                      child: VersionHistoryScreen(entry: entry),
+                onOpenFile:
+                    (entry) => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder:
+                            (_) => ChangeNotifierProvider.value(
+                              value: drive,
+                              child: VersionHistoryScreen(entry: entry),
+                            ),
+                      ),
                     ),
-                  ),
-                ),
                 onRename: (entry) => _renameEntry(context, entry),
                 onMove: (entry) => _moveEntry(context, entry),
                 onDelete: (entry) => _confirmDelete(context, entry),
@@ -301,15 +335,19 @@ class _StatusBar extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16),
           children: [
             _StatusChip(
-              icon: auth.isDemoMode
-                  ? Icons.science_outlined
-                  : Icons.cloud_done_outlined,
+              icon:
+                  auth.isDemoMode
+                      ? Icons.science_outlined
+                      : Icons.cloud_done_outlined,
               label: auth.isDemoMode ? 'Modo demo' : 'Conectado a GitHub',
               backgroundColor:
-                  auth.isDemoMode ? colors.tertiaryContainer : colors.primaryContainer,
-              foregroundColor: auth.isDemoMode
-                  ? colors.onTertiaryContainer
-                  : colors.onPrimaryContainer,
+                  auth.isDemoMode
+                      ? colors.tertiaryContainer
+                      : colors.primaryContainer,
+              foregroundColor:
+                  auth.isDemoMode
+                      ? colors.onTertiaryContainer
+                      : colors.onPrimaryContainer,
             ),
             if (repoName != null) ...[
               const SizedBox(width: 8),
@@ -391,8 +429,33 @@ class _UploadSheetState extends State<_UploadSheet> {
     try {
       final result = await FilePicker.pickFiles(withData: true);
       final picked = result?.files.single;
-      if (picked != null && picked.bytes != null) {
-        setState(() => _file = picked);
+      if (picked == null) {
+        // El usuario cerró el selector sin elegir nada: no es un error.
+        return;
+      }
+      if (picked.bytes == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No se pudo leer el contenido de ese archivo.'),
+            ),
+          );
+        }
+        return;
+      }
+      setState(() => _file = picked);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              describeError(
+                e,
+                fallback: 'No se pudo abrir el selector de archivos.',
+              ),
+            ),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _picking = false);
@@ -446,10 +509,7 @@ class _UploadSheetState extends State<_UploadSheet> {
                   const Icon(Icons.insert_drive_file_outlined),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      _file!.name,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    child: Text(_file!.name, overflow: TextOverflow.ellipsis),
                   ),
                   Text(
                     _formatSize(_file!.size),
@@ -492,6 +552,34 @@ class _UploadSheetState extends State<_UploadSheet> {
   }
 }
 
+/// Selector [ 📄 Lista ] / [ 📊 Tablero ] para cambiar cómo se ven los
+/// mismos ficheros: como explorador tradicional o como flujo de trabajo
+/// por fases (Kanban).
+class _ViewModeToggle extends StatelessWidget {
+  const _ViewModeToggle({required this.drive});
+
+  final DriveController drive;
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<DriveViewMode>(
+      showSelectedIcon: false,
+      segments: const [
+        ButtonSegment(
+          value: DriveViewMode.list,
+          icon: Icon(Icons.view_list_outlined),
+        ),
+        ButtonSegment(
+          value: DriveViewMode.kanban,
+          icon: Icon(Icons.view_column_outlined),
+        ),
+      ],
+      selected: {drive.viewMode},
+      onSelectionChanged: (selection) => drive.setViewMode(selection.first),
+    );
+  }
+}
+
 class _Breadcrumbs extends StatelessWidget {
   const _Breadcrumbs({required this.drive});
 
@@ -525,6 +613,35 @@ class _Breadcrumbs extends StatelessWidget {
   }
 }
 
+/// Icono representativo de un fichero (según su extensión) o carpeta.
+/// Compartido entre la vista de lista y la de tablero.
+IconData iconForDriveEntry(DriveEntry entry) {
+  if (entry.isFolder) return Icons.folder_outlined;
+  final ext =
+      entry.name.contains('.') ? entry.name.split('.').last.toLowerCase() : '';
+  switch (ext) {
+    case 'pdf':
+      return Icons.picture_as_pdf_outlined;
+    case 'doc':
+    case 'docx':
+      return Icons.description_outlined;
+    case 'xls':
+    case 'xlsx':
+      return Icons.table_chart_outlined;
+    case 'jpg':
+    case 'jpeg':
+    case 'png':
+    case 'gif':
+    case 'webp':
+      return Icons.image_outlined;
+    case 'zip':
+    case 'rar':
+      return Icons.folder_zip_outlined;
+    default:
+      return Icons.insert_drive_file_outlined;
+  }
+}
+
 class _DriveBody extends StatelessWidget {
   const _DriveBody({
     required this.drive,
@@ -541,34 +658,6 @@ class _DriveBody extends StatelessWidget {
   final ValueChanged<DriveEntry> onRename;
   final ValueChanged<DriveEntry> onMove;
   final ValueChanged<DriveEntry> onDelete;
-
-  IconData _iconFor(DriveEntry entry) {
-    if (entry.isFolder) return Icons.folder_outlined;
-    final ext = entry.name.contains('.')
-        ? entry.name.split('.').last.toLowerCase()
-        : '';
-    switch (ext) {
-      case 'pdf':
-        return Icons.picture_as_pdf_outlined;
-      case 'doc':
-      case 'docx':
-        return Icons.description_outlined;
-      case 'xls':
-      case 'xlsx':
-        return Icons.table_chart_outlined;
-      case 'jpg':
-      case 'jpeg':
-      case 'png':
-      case 'gif':
-      case 'webp':
-        return Icons.image_outlined;
-      case 'zip':
-      case 'rar':
-        return Icons.folder_zip_outlined;
-      default:
-        return Icons.insert_drive_file_outlined;
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -606,6 +695,14 @@ class _DriveBody extends StatelessWidget {
       );
     }
 
+    if (drive.viewMode == DriveViewMode.kanban) {
+      return _KanbanBoard(
+        drive: drive,
+        onOpenFolder: onOpenFolder,
+        onOpenFile: onOpenFile,
+      );
+    }
+
     return ListView.separated(
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
       itemCount: drive.entries.length,
@@ -613,33 +710,217 @@ class _DriveBody extends StatelessWidget {
       itemBuilder: (context, index) {
         final entry = drive.entries[index];
         return ListTile(
-          leading: CircleAvatar(child: Icon(_iconFor(entry))),
+          leading: CircleAvatar(child: Icon(iconForDriveEntry(entry))),
           title: Text(entry.name),
-          subtitle: entry.isFolder
-              ? const Text('Carpeta')
-              : const Text('Toca para ver el historial de versiones'),
-          trailing: PopupMenuButton<String>(
-            onSelected: (value) {
-              switch (value) {
-                case 'rename':
-                  onRename(entry);
-                case 'move':
-                  onMove(entry);
-                case 'delete':
-                  onDelete(entry);
-              }
-            },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'rename', child: Text('Renombrar')),
-              PopupMenuItem(value: 'move', child: Text('Mover a...')),
-              PopupMenuDivider(),
-              PopupMenuItem(value: 'delete', child: Text('Eliminar')),
+          subtitle:
+              entry.isFolder
+                  ? const Text('Carpeta')
+                  : const Text('Toca para ver el historial de versiones'),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ReviewStatusBadge(status: entry.status),
+              const SizedBox(width: 4),
+              PopupMenuButton<String>(
+                onSelected: (value) {
+                  switch (value) {
+                    case 'rename':
+                      onRename(entry);
+                    case 'move':
+                      onMove(entry);
+                    case 'delete':
+                      onDelete(entry);
+                  }
+                },
+                itemBuilder:
+                    (context) => const [
+                      PopupMenuItem(value: 'rename', child: Text('Renombrar')),
+                      PopupMenuItem(value: 'move', child: Text('Mover a...')),
+                      PopupMenuDivider(),
+                      PopupMenuItem(value: 'delete', child: Text('Eliminar')),
+                    ],
+              ),
             ],
           ),
-          onTap: () =>
-              entry.isFolder ? onOpenFolder(entry) : onOpenFile(entry),
+          onTap: () => entry.isFolder ? onOpenFolder(entry) : onOpenFile(entry),
         );
       },
+    );
+  }
+}
+
+/// Vista de tablero: los mismos ficheros de la carpeta actual, agrupados
+/// por fase en vez de en una lista. Tocar una tarjeta abre lo mismo que en
+/// la lista (la carpeta, o el historial de versiones del fichero); mover
+/// algo de "Pendiente de validación" a "Aprobado" se hace con el mismo
+/// botón "Aprobar y consolidar" que ya existe ahí, no hay arrastrar y
+/// soltar.
+class _KanbanBoard extends StatelessWidget {
+  const _KanbanBoard({
+    required this.drive,
+    required this.onOpenFolder,
+    required this.onOpenFile,
+  });
+
+  final DriveController drive;
+  final ValueChanged<DriveEntry> onOpenFolder;
+  final ValueChanged<DriveEntry> onOpenFile;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final inReview =
+        drive.entries.where((e) => e.status == ReviewStatus.inReview).toList();
+    final validated =
+        drive.entries.where((e) => e.status == ReviewStatus.validated).toList();
+
+    void openEntry(DriveEntry entry) =>
+        entry.isFolder ? onOpenFolder(entry) : onOpenFile(entry);
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _KanbanColumn(
+            title: 'En preparación',
+            icon: Icons.edit_note_outlined,
+            accentColor: colors.outline,
+            entries: const [],
+            emptyHint:
+                'Todavía no hay un paso de borrador separado: cada subida '
+                'entra directamente en "Pendiente de validación".',
+            onTap: openEntry,
+          ),
+          const SizedBox(width: 16),
+          _KanbanColumn(
+            title: 'Pendiente de validación',
+            icon: Icons.hourglass_top_outlined,
+            accentColor: const Color(0xFF8A5A00),
+            entries: inReview,
+            emptyHint: 'No hay nada pendiente de aprobar ahora mismo.',
+            onTap: openEntry,
+          ),
+          const SizedBox(width: 16),
+          _KanbanColumn(
+            title: 'Aprobado',
+            icon: Icons.verified_outlined,
+            accentColor: const Color(0xFF1B7A3D),
+            entries: validated,
+            emptyHint: 'Todavía no hay nada aprobado en esta carpeta.',
+            onTap: openEntry,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _KanbanColumn extends StatelessWidget {
+  const _KanbanColumn({
+    required this.title,
+    required this.icon,
+    required this.accentColor,
+    required this.entries,
+    required this.emptyHint,
+    required this.onTap,
+  });
+
+  final String title;
+  final IconData icon;
+  final Color accentColor;
+  final List<DriveEntry> entries;
+  final String emptyHint;
+  final ValueChanged<DriveEntry> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 280,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18, color: accentColor),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  title,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(color: accentColor),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  '${entries.length}',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (entries.isEmpty)
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                emptyHint,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            )
+          else
+            ...entries.map(
+              (entry) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _KanbanCard(entry: entry, onTap: () => onTap(entry)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _KanbanCard extends StatelessWidget {
+  const _KanbanCard({required this.entry, required this.onTap});
+
+  final DriveEntry entry;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              Icon(
+                iconForDriveEntry(entry),
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(entry.name, overflow: TextOverflow.ellipsis),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

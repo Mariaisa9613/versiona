@@ -14,7 +14,7 @@ Future<void> main() async {
 
 class VersionaApp extends StatelessWidget {
   const VersionaApp({super.key, AuthController? authController})
-      : _authController = authController;
+    : _authController = authController;
 
   /// Permite inyectar un [AuthController] (p.ej. en tests). Si se omite,
   /// se crea uno con la configuración por defecto de la app.
@@ -49,9 +49,7 @@ class _RootScreen extends StatelessWidget {
     final auth = context.watch<AuthController>();
 
     if (auth.status == AuthStatus.checking) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
     if (auth.status == AuthStatus.signedIn) {

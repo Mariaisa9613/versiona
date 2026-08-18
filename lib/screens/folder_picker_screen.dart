@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/drive_entry.dart';
 import '../services/drive_service.dart';
 import '../state/auth_controller.dart';
+import '../utils/error_messages.dart';
 
 /// Selector de carpeta destino para mover un fichero o carpeta.
 ///
@@ -51,14 +52,18 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
     try {
       final entries = await _service.listFolder(_currentPath);
       setState(() {
-        _folders = entries
-            .where((e) => e.isFolder && e.path != widget.excludePath)
-            .toList();
+        _folders =
+            entries
+                .where((e) => e.isFolder && e.path != widget.excludePath)
+                .toList();
         _loading = false;
       });
-    } catch (_) {
+    } catch (e) {
       setState(() {
-        _error = 'No se pudo cargar el contenido de esta carpeta.';
+        _error = describeError(
+          e,
+          fallback: 'No se pudo cargar el contenido de esta carpeta.',
+        );
         _loading = false;
       });
     }
@@ -71,7 +76,8 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
 
   void _goToBreadcrumb(int index) {
     setState(
-      () => _pathSegments = index < 0 ? [] : _pathSegments.sublist(0, index + 1),
+      () =>
+          _pathSegments = index < 0 ? [] : _pathSegments.sublist(0, index + 1),
     );
     _load();
   }
@@ -91,17 +97,17 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 8),
               children: [
                 TextButton.icon(
-                  onPressed:
-                      crumbs.isEmpty ? null : () => _goToBreadcrumb(-1),
+                  onPressed: crumbs.isEmpty ? null : () => _goToBreadcrumb(-1),
                   icon: const Icon(Icons.home_outlined, size: 18),
                   label: const Text('Mi Drive'),
                 ),
                 for (var i = 0; i < crumbs.length; i++) ...[
                   const Icon(Icons.chevron_right, size: 18),
                   TextButton(
-                    onPressed: i == crumbs.length - 1
-                        ? null
-                        : () => _goToBreadcrumb(i),
+                    onPressed:
+                        i == crumbs.length - 1
+                            ? null
+                            : () => _goToBreadcrumb(i),
                     child: Text(crumbs[i]),
                   ),
                 ],

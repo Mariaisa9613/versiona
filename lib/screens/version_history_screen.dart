@@ -6,6 +6,8 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/drive_entry.dart';
 import '../models/file_version.dart';
 import '../state/drive_controller.dart';
+import '../utils/error_messages.dart';
+import '../widgets/review_status_badge.dart';
 
 class VersionHistoryScreen extends StatefulWidget {
   const VersionHistoryScreen({super.key, required this.entry});
@@ -32,23 +34,24 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
   Future<void> _restore(FileVersion version) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Restaurar esta versión'),
-        content: Text(
-          'Se creará una nueva versión de "${widget.entry.name}" con el '
-          'contenido de esta. El historial actual se conserva.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancelar'),
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Restaurar esta versión'),
+            content: Text(
+              'Se creará una nueva versión de "${widget.entry.name}" con el '
+              'contenido de esta. El historial actual se conserva.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Restaurar'),
+              ),
+            ],
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Restaurar'),
-          ),
-        ],
-      ),
     );
 
     if (confirmed != true || !mounted) return;
@@ -62,9 +65,76 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
       messenger.showSnackBar(
         const SnackBar(content: Text('Versión restaurada')),
       );
-    } catch (_) {
+    } catch (e) {
       messenger.showSnackBar(
-        const SnackBar(content: Text('No se pudo restaurar la versión.')),
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo restaurar la versión.'),
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _approveAndConsolidate() async {
+    final summaryController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Aprobar y consolidar'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Esto aprobará TODOS los cambios pendientes en revisión '
+                  '(no solo este fichero) y los consolidará como la versión '
+                  'oficial.',
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: summaryController,
+                  decoration: const InputDecoration(
+                    labelText: 'Resumen de la aprobación (opcional)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Aprobar y consolidar'),
+              ),
+            ],
+          ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final drive = context.read<DriveController>();
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+
+    try {
+      await drive.approveAndConsolidate(summary: summaryController.text);
+      if (!mounted) return;
+      navigator.pop();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Cambios aprobados y consolidados')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo aprobar los cambios.'),
+          ),
+        ),
       );
     }
   }
@@ -72,6 +142,7 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
   @override
   Widget build(BuildContext context) {
     final drive = context.read<DriveController>();
+    final isInReview = widget.entry.status == ReviewStatus.inReview;
 
     return Scaffold(
       appBar: AppBar(
@@ -80,156 +151,192 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
           IconButton(
             tooltip: 'Ver en GitHub',
             icon: const Icon(Icons.open_in_new),
-            onPressed: () => launchUrl(
-              Uri.parse(drive.webUrlFor(widget.entry)),
-              mode: LaunchMode.externalApplication,
-            ),
+            onPressed:
+                () => launchUrl(
+                  Uri.parse(drive.webUrlFor(widget.entry)),
+                  mode: LaunchMode.externalApplication,
+                ),
           ),
         ],
       ),
-      body: FutureBuilder<List<FileVersion>>(
-        future: _future,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return const Center(
-              child: Text('No se pudo cargar el historial de versiones.'),
-            );
-          }
+      bottomNavigationBar:
+          isInReview
+              ? SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: FilledButton.icon(
+                    onPressed: _approveAndConsolidate,
+                    icon: const Icon(Icons.task_alt),
+                    label: const Text('Aprobar y consolidar'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(48),
+                      backgroundColor: const Color(0xFF1B7A3D),
+                    ),
+                  ),
+                ),
+              )
+              : null,
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: ReviewStatusBadge(status: widget.entry.status),
+            ),
+          ),
+          Expanded(child: _buildVersionList()),
+        ],
+      ),
+    );
+  }
 
-          final versions = snapshot.data ?? const [];
-          if (versions.isEmpty) {
-            return const Center(child: Text('Sin versiones todavía.'));
-          }
+  Widget _buildVersionList() {
+    return FutureBuilder<List<FileVersion>>(
+      future: _future,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return const Center(
+            child: Text('No se pudo cargar el historial de versiones.'),
+          );
+        }
 
-          return ListView.builder(
-            padding: const EdgeInsets.all(16),
-            itemCount: versions.length,
-            itemBuilder: (context, index) {
-              final version = versions[index];
-              final isLatest = index == 0;
-              // El historial llega del más reciente al más antiguo; se
-              // numera al revés para que la v1 sea siempre la primera
-              // versión que existió del fichero.
-              final versionNumber = versions.length - index;
+        final versions = snapshot.data ?? const [];
+        if (versions.isEmpty) {
+          return const Center(child: Text('Sin versiones todavía.'));
+        }
 
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 16),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Column(
-                      children: [
-                        CircleAvatar(
-                          radius: 14,
-                          backgroundColor: isLatest
-                              ? Theme.of(context).colorScheme.primary
-                              : Theme.of(context)
-                                  .colorScheme
-                                  .surfaceContainerHighest,
-                          backgroundImage: version.authorAvatarUrl != null
-                              ? NetworkImage(version.authorAvatarUrl!)
-                              : null,
-                          child: version.authorAvatarUrl == null
-                              ? Icon(
+        return ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: versions.length,
+          itemBuilder: (context, index) {
+            final version = versions[index];
+            final isLatest = index == 0;
+            // El historial llega del más reciente al más antiguo; se
+            // numera al revés para que la v1 sea siempre la primera
+            // versión que existió del fichero.
+            final versionNumber = versions.length - index;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Column(
+                    children: [
+                      CircleAvatar(
+                        radius: 14,
+                        backgroundColor:
+                            isLatest
+                                ? Theme.of(context).colorScheme.primary
+                                : Theme.of(
+                                  context,
+                                ).colorScheme.surfaceContainerHighest,
+                        backgroundImage:
+                            version.authorAvatarUrl != null
+                                ? NetworkImage(version.authorAvatarUrl!)
+                                : null,
+                        child:
+                            version.authorAvatarUrl == null
+                                ? Icon(
                                   Icons.person,
                                   size: 14,
-                                  color: isLatest
-                                      ? Theme.of(context)
-                                          .colorScheme
-                                          .onPrimary
-                                      : Theme.of(context)
-                                          .colorScheme
-                                          .onSurface,
+                                  color:
+                                      isLatest
+                                          ? Theme.of(
+                                            context,
+                                          ).colorScheme.onPrimary
+                                          : Theme.of(
+                                            context,
+                                          ).colorScheme.onSurface,
                                 )
-                              : null,
+                                : null,
+                      ),
+                      if (index != versions.length - 1)
+                        Container(
+                          width: 2,
+                          height: 56,
+                          color: Theme.of(context).colorScheme.outlineVariant,
                         ),
-                        if (index != versions.length - 1)
-                          Container(
-                            width: 2,
-                            height: 56,
-                            color: Theme.of(context).colorScheme.outlineVariant,
-                          ),
-                      ],
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Text(
-                                    'Versión $versionNumber',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .labelLarge
-                                        ?.copyWith(fontWeight: FontWeight.bold),
-                                  ),
-                                  if (isLatest) ...[
-                                    const SizedBox(width: 8),
-                                    Chip(
-                                      label: const Text('Actual'),
-                                      visualDensity: VisualDensity.compact,
-                                      materialTapTargetSize:
-                                          MaterialTapTargetSize.shrinkWrap,
-                                    ),
-                                  ],
-                                  const Spacer(),
-                                  Text(
-                                    _formatDate(version.date),
-                                    style: Theme.of(context).textTheme.bodySmall,
+                    ],
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Text(
+                                  'Versión $versionNumber',
+                                  style: Theme.of(context).textTheme.labelLarge
+                                      ?.copyWith(fontWeight: FontWeight.bold),
+                                ),
+                                if (isLatest) ...[
+                                  const SizedBox(width: 8),
+                                  Chip(
+                                    label: const Text('Actual'),
+                                    visualDensity: VisualDensity.compact,
+                                    materialTapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
                                   ),
                                 ],
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                version.message,
-                                style: Theme.of(context).textTheme.titleMedium,
-                              ),
-                              const SizedBox(height: 8),
-                              Row(
-                                children: [
-                                  Icon(
-                                    Icons.person_outline,
-                                    size: 16,
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onSurfaceVariant,
+                                const Spacer(),
+                                Text(
+                                  _formatDate(version.date),
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              version.message,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Icon(
+                                  Icons.person_outline,
+                                  size: 16,
+                                  color:
+                                      Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                ),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: Text(
+                                    version.authorName,
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
                                   ),
-                                  const SizedBox(width: 4),
-                                  Expanded(
-                                    child: Text(
-                                      version.authorName,
-                                      style:
-                                          Theme.of(context).textTheme.bodySmall,
-                                    ),
+                                ),
+                                if (!isLatest)
+                                  TextButton.icon(
+                                    onPressed: () => _restore(version),
+                                    icon: const Icon(Icons.restore, size: 18),
+                                    label: const Text('Restaurar'),
                                   ),
-                                  if (!isLatest)
-                                    TextButton.icon(
-                                      onPressed: () => _restore(version),
-                                      icon: const Icon(Icons.restore, size: 18),
-                                      label: const Text('Restaurar'),
-                                    ),
-                                ],
-                              ),
-                            ],
-                          ),
+                              ],
+                            ),
+                          ],
                         ),
                       ),
                     ),
-                  ],
-                ),
-              );
-            },
-          );
-        },
-      ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 

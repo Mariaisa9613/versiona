@@ -20,9 +20,10 @@ class FileVersion {
     final gitAuthor = commit.commit?.author;
     return FileVersion(
       sha: commit.sha ?? '',
-      message: (commit.commit?.message ?? '').trim().isEmpty
-          ? '(sin mensaje)'
-          : commit.commit!.message!.trim(),
+      message:
+          (commit.commit?.message ?? '').trim().isEmpty
+              ? '(sin mensaje)'
+              : commit.commit!.message!.trim(),
       authorName:
           commit.author?.login ?? gitAuthor?.name ?? 'Colaborador desconocido',
       authorAvatarUrl: commit.author?.avatarUrl,

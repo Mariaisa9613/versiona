@@ -50,12 +50,15 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: Consumer<AuthController>(
-                    builder: (context, auth, _) => switch (auth.status) {
-                      AuthStatus.awaitingUserCode =>
-                        _DeviceCodeCard(auth: auth),
-                      AuthStatus.preparingWorkspace => const _PreparingCard(),
-                      _ => _WelcomeCard(auth: auth),
-                    },
+                    builder:
+                        (context, auth, _) => switch (auth.status) {
+                          AuthStatus.awaitingUserCode => _DeviceCodeCard(
+                            auth: auth,
+                          ),
+                          AuthStatus.preparingWorkspace =>
+                            const _PreparingCard(),
+                          _ => _WelcomeCard(auth: auth),
+                        },
                   ),
                 ),
               );
@@ -83,10 +86,7 @@ class _WelcomeCard extends StatelessWidget {
           color: Theme.of(context).colorScheme.primary,
         ),
         const SizedBox(height: 24),
-        Text(
-          'Versiona',
-          style: Theme.of(context).textTheme.headlineMedium,
-        ),
+        Text('Versiona', style: Theme.of(context).textTheme.headlineMedium),
         const SizedBox(height: 12),
         Text(
           'Guarda tus ficheros y organízalos en carpetas con el historial '
@@ -146,9 +146,7 @@ class _WelcomeCard extends StatelessWidget {
               isGitHubLoginSupportedOnThisPlatform ? auth.startSignIn : null,
           icon: const Icon(Icons.link),
           label: const Text('Conectar con GitHub'),
-          style: FilledButton.styleFrom(
-            minimumSize: const Size.fromHeight(48),
-          ),
+          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
         ),
       ],
     );
@@ -199,9 +197,9 @@ class _DeviceCodeCard extends StatelessWidget {
                 Text(
                   request.userCode,
                   style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                        letterSpacing: 4,
-                        fontWeight: FontWeight.bold,
-                      ),
+                    letterSpacing: 4,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 IconButton(
                   tooltip: 'Copiar código',
@@ -218,12 +216,14 @@ class _DeviceCodeCard extends StatelessWidget {
           ),
           const SizedBox(height: 24),
           FilledButton.icon(
-            onPressed: () => launchUrl(
-              Uri.parse(request.verificationUri),
-              mode: isMobilePlatform
-                  ? LaunchMode.inAppBrowserView
-                  : LaunchMode.externalApplication,
-            ),
+            onPressed:
+                () => launchUrl(
+                  Uri.parse(request.verificationUri),
+                  mode:
+                      isMobilePlatform
+                          ? LaunchMode.inAppBrowserView
+                          : LaunchMode.externalApplication,
+                ),
             icon: const Icon(Icons.open_in_new),
             label: const Text('Abrir GitHub'),
             style: FilledButton.styleFrom(

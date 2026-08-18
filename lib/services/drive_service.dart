@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:github/github.dart';
 
 import '../config/github_config.dart';
@@ -9,11 +10,22 @@ import '../models/file_version.dart';
 /// Convierte el repositorio privado del usuario en un "Drive": expone
 /// operaciones de fichero/carpeta simples por encima de la API de GitHub,
 /// para que el resto de la app nunca tenga que hablar en términos de Git.
+///
+/// Todos los cambios (subir, crear carpeta, borrar, renombrar, mover,
+/// restaurar) se escriben en la rama de revisión
+/// ([GitHubConfig.reviewBranchName]), nunca directamente en la rama
+/// validada. Un fichero está "Validado" cuando su contenido en la rama de
+/// revisión coincide con el de la rama validada; en caso contrario está
+/// "En revisión" hasta que alguien apruebe los cambios, lo que fusiona la
+/// rama de revisión sobre la validada con un commit de fusión real.
 class DriveService {
   DriveService(this._github);
 
   final GitHub _github;
   RepositorySlug? _slug;
+  String? _defaultBranch;
+
+  static const String _workingBranch = GitHubConfig.reviewBranchName;
 
   RepositorySlug get slug {
     final s = _slug;
@@ -23,20 +35,29 @@ class DriveService {
     return s;
   }
 
+  String get _validatedBranch {
+    final b = _defaultBranch;
+    if (b == null) {
+      throw StateError('El repositorio del Drive todavía no está listo.');
+    }
+    return b;
+  }
+
   /// Nombre del repositorio activo, o `null` si `ensureDriveRepo` todavía
   /// no ha terminado. Pensado para mostrar contexto en la interfaz sin
   /// arriesgarse a lanzar una excepción.
   String? get repoName => _slug?.name;
 
   /// Busca el repositorio de datos del usuario y lo crea si es la primera
-  /// vez que conecta su cuenta.
+  /// vez que conecta su cuenta. También garantiza que exista la rama de
+  /// revisión donde se escriben todos los cambios pendientes de aprobar.
   Future<RepositorySlug> ensureDriveRepo(String ownerLogin) async {
     final candidate = RepositorySlug(ownerLogin, GitHubConfig.driveRepoName);
+    Repository repo;
     try {
-      final repo = await _github.repositories.getRepository(candidate);
-      _slug = RepositorySlug.full(repo.fullName);
+      repo = await _github.repositories.getRepository(candidate);
     } on RepositoryNotFound {
-      final created = await _github.repositories.createRepository(
+      repo = await _github.repositories.createRepository(
         CreateRepository(
           GitHubConfig.driveRepoName,
           description:
@@ -47,30 +68,62 @@ class DriveService {
           hasWiki: false,
         ),
       );
-      _slug = RepositorySlug.full(created.fullName);
     }
+    _slug = RepositorySlug.full(repo.fullName);
+    _defaultBranch =
+        repo.defaultBranch.isNotEmpty ? repo.defaultBranch : 'main';
+    await _ensureReviewBranch();
     return _slug!;
+  }
+
+  Future<void> _ensureReviewBranch() async {
+    try {
+      await _github.git.getReference(slug, 'heads/$_workingBranch');
+    } on NotFound {
+      final base = await _github.git.getReference(
+        slug,
+        'heads/$_validatedBranch',
+      );
+      await _github.git.createReference(
+        slug,
+        'refs/heads/$_workingBranch',
+        base.object!.sha,
+      );
+    }
   }
 
   String _joinPath(String folderPath, String name) =>
       folderPath.isEmpty ? name : '$folderPath/$name';
 
-  /// Lista el contenido (ficheros y carpetas) de [folderPath].
-  /// Usa cadena vacía para la raíz del Drive.
+  /// Lista el contenido (ficheros y carpetas) de [folderPath], con el
+  /// estado de aprobación de cada uno. Usa cadena vacía para la raíz.
   Future<List<DriveEntry>> listFolder(String folderPath) async {
     final contents = await _github.repositories.getContents(
       slug,
       folderPath,
+      ref: _workingBranch,
     );
 
     if (contents.isFile) {
       return const [];
     }
 
-    final entries = (contents.tree ?? [])
-        .where((f) => f.name != GitHubConfig.folderKeepFile)
-        .map(DriveEntry.fromGitHubFile)
-        .toList();
+    final validatedShaByPath = await _validatedShasFor(folderPath);
+
+    final entries =
+        (contents.tree ?? [])
+            .where((f) => f.name != GitHubConfig.folderKeepFile)
+            .map((f) {
+              final isValidated = validatedShaByPath[f.path] == f.sha;
+              return DriveEntry.fromGitHubFile(
+                f,
+                status:
+                    isValidated
+                        ? ReviewStatus.validated
+                        : ReviewStatus.inReview,
+              );
+            })
+            .toList();
 
     entries.sort((a, b) {
       if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
@@ -78,6 +131,31 @@ class DriveService {
     });
 
     return entries;
+  }
+
+  /// Rutas -> sha de cada entrada de [folderPath] tal y como está en la
+  /// rama validada, para poder comparar con la rama de revisión.
+  Future<Map<String, String>> _validatedShasFor(String folderPath) async {
+    try {
+      final validated = await _github.repositories.getContents(
+        slug,
+        folderPath,
+        ref: _validatedBranch,
+      );
+      if (!validated.isDirectory) return const {};
+      return {
+        for (final f in validated.tree ?? const <GitHubFile>[])
+          if (f.path != null && f.sha != null) f.path!: f.sha!,
+      };
+    } on GitHubError {
+      // getContents() no conserva el código HTTP real: cualquier error de
+      // GitHub con un campo "message" llega aquí como GitHubError genérico
+      // en vez del NotFound tipado. En la práctica, para esta llamada
+      // concreta, casi siempre significa que esta carpeta todavía no existe
+      // en la rama validada: todo lo que haya aquí está pendiente de
+      // aprobación.
+      return const {};
+    }
   }
 
   /// Sube (crea o actualiza) un fichero dentro de [folderPath].
@@ -96,32 +174,58 @@ class DriveService {
 
     GitHubFile? existing;
     try {
-      final current = await _github.repositories.getContents(slug, path);
+      final current = await _github.repositories.getContents(
+        slug,
+        path,
+        ref: _workingBranch,
+      );
       existing = current.isFile ? current.file : null;
-    } on NotFound {
+    } on GitHubError catch (e) {
+      // Igual que en _validatedShasFor: getContents() lanza un GitHubError
+      // genérico (no el NotFound tipado) cuando el fichero todavía no
+      // existe en la rama de revisión, que es el caso normal al subir algo
+      // por primera vez.
+      debugPrint(
+        '[Versiona] getContents("$path", ref: "$_workingBranch") → '
+        '${e.runtimeType}: ${e.message}. Se asume que no existe todavía.',
+      );
       existing = null;
     }
 
     final hasCustomMessage =
         commitMessage != null && commitMessage.trim().isNotEmpty;
 
-    if (existing?.sha != null) {
-      await _github.repositories.updateFile(
-        slug,
-        path,
-        hasCustomMessage ? commitMessage.trim() : 'Actualizar $fileName',
-        content,
-        existing!.sha!,
-      );
-    } else {
-      await _github.repositories.createFile(
-        slug,
-        CreateFile(
-          path: path,
-          content: content,
-          message: hasCustomMessage ? commitMessage.trim() : 'Subir $fileName',
-        ),
-      );
+    debugPrint(
+      '[Versiona] Subiendo "$path" a la rama "$_workingBranch" '
+      '(${existing?.sha != null ? "actualizar" : "crear"})',
+    );
+
+    try {
+      if (existing?.sha != null) {
+        await _github.repositories.updateFile(
+          slug,
+          path,
+          hasCustomMessage ? commitMessage.trim() : 'Actualizar $fileName',
+          content,
+          existing!.sha!,
+          branch: _workingBranch,
+        );
+      } else {
+        await _github.repositories.createFile(
+          slug,
+          CreateFile(
+            path: path,
+            content: content,
+            message:
+                hasCustomMessage ? commitMessage.trim() : 'Subir $fileName',
+            branch: _workingBranch,
+          ),
+        );
+      }
+      debugPrint('[Versiona] Subida de "$path" completada.');
+    } catch (e, stackTrace) {
+      debugPrint('[Versiona] Fallo al subir "$path": $e\n$stackTrace');
+      rethrow;
     }
   }
 
@@ -131,16 +235,21 @@ class DriveService {
     required String folderPath,
     required String name,
   }) async {
-    final placeholderPath =
-        _joinPath(_joinPath(folderPath, name), GitHubConfig.folderKeepFile);
+    final placeholderPath = _joinPath(
+      _joinPath(folderPath, name),
+      GitHubConfig.folderKeepFile,
+    );
     await _github.repositories.createFile(
       slug,
       CreateFile(
         path: placeholderPath,
-        content: base64Encode(utf8.encode(
-          'Este fichero mantiene la carpeta "$name" en Versiona.\n',
-        )),
+        content: base64Encode(
+          utf8.encode(
+            'Este fichero mantiene la carpeta "$name" en Versiona.\n',
+          ),
+        ),
         message: 'Crear carpeta $name',
+        branch: _workingBranch,
       ),
     );
   }
@@ -153,7 +262,7 @@ class DriveService {
         entry.path,
         'Eliminar ${entry.name}',
         entry.sha!,
-        '',
+        _workingBranch,
       );
       return;
     }
@@ -165,13 +274,17 @@ class DriveService {
         file.path!,
         'Eliminar carpeta ${entry.name}',
         file.sha!,
-        '',
+        _workingBranch,
       );
     }
   }
 
   Future<List<GitHubFile>> _collectFilesRecursively(String path) async {
-    final contents = await _github.repositories.getContents(slug, path);
+    final contents = await _github.repositories.getContents(
+      slug,
+      path,
+      ref: _workingBranch,
+    );
     if (contents.isFile) {
       return contents.file != null ? [contents.file!] : [];
     }
@@ -191,7 +304,9 @@ class DriveService {
   /// reciente al más antiguo.
   Future<List<FileVersion>> fileHistory(String path) async {
     final commits =
-        await _github.repositories.listCommits(slug, path: path).toList();
+        await _github.repositories
+            .listCommits(slug, path: path, sha: _workingBranch)
+            .toList();
     return commits.map(FileVersion.fromCommit).toList();
   }
 
@@ -212,7 +327,11 @@ class DriveService {
       throw StateError('No se pudo leer esa versión del fichero.');
     }
 
-    final current = await _github.repositories.getContents(slug, path);
+    final current = await _github.repositories.getContents(
+      slug,
+      path,
+      ref: _workingBranch,
+    );
     final currentSha = current.file?.sha;
     if (currentSha == null) {
       throw StateError('El fichero ya no existe en su ubicación actual.');
@@ -225,12 +344,13 @@ class DriveService {
       'Restaurar $fileName a una versión anterior',
       rawContent,
       currentSha,
+      branch: _workingBranch,
     );
   }
 
   /// Enlace a la vista de GitHub para inspeccionar un fichero en detalle.
   String webUrlFor(String path) =>
-      'https://github.com/${slug.fullName}/blob/HEAD/$path';
+      'https://github.com/${slug.fullName}/blob/$_workingBranch/$path';
 
   String _parentPath(String path) {
     final index = path.lastIndexOf('/');
@@ -272,7 +392,11 @@ class DriveService {
     if (newPath == entry.path) return;
 
     if (!entry.isFolder) {
-      final current = await _github.repositories.getContents(slug, entry.path);
+      final current = await _github.repositories.getContents(
+        slug,
+        entry.path,
+        ref: _workingBranch,
+      );
       final file = current.file;
       if (file?.content == null || file?.sha == null) {
         throw StateError('No se pudo leer el fichero.');
@@ -283,6 +407,7 @@ class DriveService {
           path: newPath,
           content: file!.content!.replaceAll('\n', ''),
           message: 'Mover ${entry.name}',
+          branch: _workingBranch,
         ),
       );
       await _github.repositories.deleteFile(
@@ -290,7 +415,7 @@ class DriveService {
         entry.path,
         'Mover ${entry.name}',
         file.sha!,
-        '',
+        _workingBranch,
       );
       return;
     }
@@ -305,6 +430,7 @@ class DriveService {
       final contents = await _github.repositories.getContents(
         slug,
         file.path!,
+        ref: _workingBranch,
       );
       final content = contents.file?.content;
       if (content == null) continue;
@@ -322,6 +448,7 @@ class DriveService {
           path: creation.key,
           content: creation.value,
           message: 'Mover ${entry.name}',
+          branch: _workingBranch,
         ),
       );
     }
@@ -331,7 +458,56 @@ class DriveService {
         file.path!,
         'Mover ${entry.name}',
         file.sha!,
-        '',
+        _workingBranch,
+      );
+    }
+  }
+
+  /// Aprueba todos los cambios pendientes: fusiona la rama de revisión
+  /// sobre la rama validada con un commit de fusión real (no se reescribe
+  /// ni se pierde historial).
+  ///
+  /// Nota: fusiona TODO lo que haya en la rama de revisión, no solo el
+  /// fichero desde el que se llame a esta acción, porque de momento hay
+  /// una única rama compartida para todos los cambios pendientes.
+  ///
+  /// De momento cualquier persona con la app conectada puede aprobar: no
+  /// hay todavía un rol de "supervisor" restringido por permisos.
+  Future<void> approveAndConsolidate({String? summary}) async {
+    final GitHubComparison comparison;
+    try {
+      comparison = await _github.repositories.compareCommits(
+        slug,
+        _validatedBranch,
+        _workingBranch,
+      );
+    } on GitHubError catch (e) {
+      throw StateError(
+        'No se pudo comprobar los cambios pendientes entre '
+        '"$_validatedBranch" y "$_workingBranch": ${e.message}',
+      );
+    }
+
+    if ((comparison.aheadBy ?? 0) == 0) {
+      throw StateError('No hay cambios pendientes de aprobar.');
+    }
+
+    try {
+      await _github.repositories.merge(
+        slug,
+        CreateMerge(
+          _validatedBranch,
+          _workingBranch,
+          commitMessage:
+              (summary != null && summary.trim().isNotEmpty)
+                  ? summary.trim()
+                  : 'Aprobar y consolidar cambios pendientes',
+        ),
+      );
+    } on GitHubError catch (e) {
+      throw StateError(
+        'No se pudo fusionar "$_workingBranch" sobre '
+        '"$_validatedBranch": ${e.message}',
       );
     }
   }

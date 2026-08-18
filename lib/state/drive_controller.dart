@@ -3,6 +3,9 @@ import 'package:flutter/foundation.dart';
 import '../models/drive_entry.dart';
 import '../models/file_version.dart';
 import '../services/drive_service.dart';
+import '../utils/error_messages.dart';
+
+enum DriveViewMode { list, kanban }
 
 /// Estado de navegación y contenido de la carpeta actual del Drive.
 class DriveController extends ChangeNotifier {
@@ -14,6 +17,13 @@ class DriveController extends ChangeNotifier {
   List<DriveEntry> entries = const [];
   bool loading = true;
   String? error;
+  DriveViewMode viewMode = DriveViewMode.list;
+
+  void setViewMode(DriveViewMode mode) {
+    if (viewMode == mode) return;
+    viewMode = mode;
+    notifyListeners();
+  }
 
   List<String> get breadcrumbs => List.unmodifiable(_pathSegments);
   String get currentPath => _pathSegments.join('/');
@@ -26,8 +36,11 @@ class DriveController extends ChangeNotifier {
 
     try {
       entries = await _service.listFolder(currentPath);
-    } catch (_) {
-      error = 'No se pudo cargar el contenido de esta carpeta.';
+    } catch (e) {
+      error = describeError(
+        e,
+        fallback: 'No se pudo cargar el contenido de esta carpeta.',
+      );
       entries = const [];
     } finally {
       loading = false;
@@ -43,8 +56,7 @@ class DriveController extends ChangeNotifier {
   /// Navega a un nivel concreto de las migas de pan.
   /// [index] == -1 vuelve a la raíz del Drive.
   Future<void> goToBreadcrumb(int index) async {
-    _pathSegments =
-        index < 0 ? [] : _pathSegments.sublist(0, index + 1);
+    _pathSegments = index < 0 ? [] : _pathSegments.sublist(0, index + 1);
     await load();
   }
 
@@ -96,5 +108,13 @@ class DriveController extends ChangeNotifier {
       versionSha: version.sha,
       fileName: entry.name,
     );
+    await load();
+  }
+
+  /// Aprueba TODOS los cambios pendientes en revisión (no solo un fichero
+  /// concreto) y los consolida como la versión oficial.
+  Future<void> approveAndConsolidate({String? summary}) async {
+    await _service.approveAndConsolidate(summary: summary);
+    await load();
   }
 }

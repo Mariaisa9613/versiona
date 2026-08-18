@@ -30,8 +30,8 @@ class AuthController extends ChangeNotifier {
   AuthController({
     SecureStorageService? storage,
     GitHubDeviceAuthService? deviceAuth,
-  })  : _storage = storage ?? SecureStorageService(),
-        _deviceAuth = deviceAuth ?? GitHubDeviceAuthService();
+  }) : _storage = storage ?? SecureStorageService(),
+       _deviceAuth = deviceAuth ?? GitHubDeviceAuthService();
 
   final SecureStorageService _storage;
   final GitHubDeviceAuthService _deviceAuth;

@@ -62,6 +62,12 @@ class GitHubConfig {
   /// guardar los ficheros del usuario.
   static const String driveRepoName = 'versiona-drive';
 
+  /// Rama donde se escriben todos los cambios (subir, borrar, renombrar,
+  /// mover, restaurar) antes de ser aprobados. La rama por defecto del
+  /// repositorio (normalmente "main") solo se actualiza cuando alguien
+  /// pulsa "Aprobar y consolidar", que fusiona esta rama sobre ella.
+  static const String reviewBranchName = 'en-revision';
+
   /// Nombre del fichero "placeholder" usado para poder crear carpetas
   /// vacías (Git no versiona carpetas vacías).
   static const String folderKeepFile = '.versiona-keep';
