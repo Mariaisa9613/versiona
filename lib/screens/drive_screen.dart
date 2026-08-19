@@ -7,6 +7,7 @@ import '../models/drive_entry.dart';
 import '../state/auth_controller.dart';
 import '../state/drive_controller.dart';
 import '../utils/error_messages.dart';
+import '../utils/repo_naming.dart';
 import '../widgets/review_status_badge.dart';
 import 'folder_picker_screen.dart';
 import 'version_history_screen.dart';
@@ -354,7 +355,11 @@ class _StatusBar extends StatelessWidget {
             ),
             if (repoName != null) ...[
               const SizedBox(width: 8),
-              _RepoSwitcherChip(drive: drive, repoName: repoName),
+              _RepoSwitcherChip(
+                drive: drive,
+                repoName: repoName,
+                username: auth.currentUser?.login,
+              ),
             ],
           ],
         ),
@@ -383,10 +388,15 @@ class _OpenManage extends _RepoMenuChoice {
 }
 
 class _RepoSwitcherChip extends StatelessWidget {
-  const _RepoSwitcherChip({required this.drive, required this.repoName});
+  const _RepoSwitcherChip({
+    required this.drive,
+    required this.repoName,
+    required this.username,
+  });
 
   final DriveController drive;
   final String repoName;
+  final String? username;
 
   @override
   Widget build(BuildContext context) {
@@ -402,7 +412,8 @@ class _RepoSwitcherChip extends StatelessWidget {
           case _OpenManage():
             showDialog(
               context: context,
-              builder: (_) => _ManageReposDialog(drive: drive),
+              builder:
+                  (_) => _ManageReposDialog(drive: drive, username: username),
             );
         }
       },
@@ -484,45 +495,79 @@ class _RepoSwitcherChip extends StatelessWidget {
 /// repositorio antes de dejar pulsar "Eliminar" — igual que hace GitHub en
 /// su propia web, para que no se pueda borrar de un toque accidental.
 class _ManageReposDialog extends StatelessWidget {
-  const _ManageReposDialog({required this.drive});
+  const _ManageReposDialog({required this.drive, required this.username});
 
   final DriveController drive;
+  final String? username;
+
+  /// Nombre final del repositorio a partir de lo que el usuario escriba en
+  /// "Nombre del proyecto": lo convierte en un nombre válido para GitHub, o
+  /// si lo deja en blanco (o no queda nada válido tras limpiarlo), genera
+  /// uno inteligente a partir de su usuario y el año actual.
+  String _resolveRepoName(String rawInput) {
+    final slug = slugifyRepoName(rawInput);
+    if (slug.isNotEmpty) return slug;
+
+    final year = DateTime.now().year;
+    final owner =
+        (username == null || username!.isEmpty)
+            ? 'mi'
+            : slugifyRepoName(username!);
+    return '$owner-drive-$year';
+  }
 
   Future<void> _create(BuildContext context) async {
     final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
       builder:
-          (context) => AlertDialog(
-            title: const Text('Nuevo repositorio'),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'p. ej. facturas',
-              ),
-              onSubmitted: (v) => Navigator.of(context).pop(v),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Cancelar'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(controller.text),
-                child: const Text('Crear'),
-              ),
-            ],
+          (context) => StatefulBuilder(
+            builder: (context, setState) {
+              final preview = _resolveRepoName(controller.text);
+              return AlertDialog(
+                title: const Text('Nombre del proyecto'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: controller,
+                      autofocus: true,
+                      onChanged: (_) => setState(() {}),
+                      decoration: const InputDecoration(
+                        hintText: 'p. ej. Tesorería',
+                      ),
+                      onSubmitted: (v) => Navigator.of(context).pop(v),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Se creará como "$preview".',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Cancelar'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.of(context).pop(controller.text),
+                    child: const Text('Crear'),
+                  ),
+                ],
+              );
+            },
           ),
     );
 
-    final trimmed = name?.trim() ?? '';
-    if (trimmed.isEmpty) return;
+    if (name == null) return;
     if (!context.mounted) return;
 
+    final repoName = _resolveRepoName(name);
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await drive.createRepo(trimmed);
+      await drive.createRepo(repoName);
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(
