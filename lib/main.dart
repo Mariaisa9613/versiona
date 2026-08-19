@@ -29,10 +29,12 @@ class VersionaApp extends StatelessWidget {
         themeMode: ThemeMode.light,
         theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(
-            seedColor: const Color(0xFF6C8EFF),
+            // Violeta Profundo: el color de marca de Versiona (a juego con
+            // el icono de la "canica").
+            seedColor: const Color(0xFF8A2BE2),
             brightness: Brightness.light,
           ),
-          scaffoldBackgroundColor: const Color(0xFFF7F8FC),
+          scaffoldBackgroundColor: const Color(0xFFF8F5FC),
           useMaterial3: true,
         ),
         home: const _RootScreen(),
