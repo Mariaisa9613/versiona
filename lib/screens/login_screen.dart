@@ -82,13 +82,15 @@ class _WelcomeCard extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(
-          Icons.folder_copy_outlined,
-          size: 72,
-          color: Theme.of(context).colorScheme.primary,
+        Image.asset('assets/branding/versiona_mark.png', height: 88),
+        const SizedBox(height: 20),
+        Text(
+          'Versiona',
+          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+            color: Theme.of(context).colorScheme.primary,
+            fontWeight: FontWeight.bold,
+          ),
         ),
-        const SizedBox(height: 24),
-        Text('Versiona', style: Theme.of(context).textTheme.headlineMedium),
         const SizedBox(height: 12),
         Text(
           'Guarda tus ficheros y organízalos en carpetas con el historial '
