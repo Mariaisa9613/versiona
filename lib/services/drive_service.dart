@@ -76,6 +76,50 @@ class DriveService {
     return _slug!;
   }
 
+  /// Cambia el Drive activo a un repositorio ya existente (elegido por el
+  /// usuario entre los suyos), asegurando que también tenga la rama de
+  /// revisión antes de empezar a usarlo.
+  Future<void> switchTo(RepositorySlug slug) async {
+    if (_slug == slug) return;
+    final repo = await _github.repositories.getRepository(slug);
+    _slug = RepositorySlug.full(repo.fullName);
+    _defaultBranch =
+        repo.defaultBranch.isNotEmpty ? repo.defaultBranch : 'main';
+    await _ensureReviewBranch();
+  }
+
+  /// Repositorios (públicos y privados) del usuario entre los que puede
+  /// elegir como Drive activo, ordenados alfabéticamente.
+  Future<List<Repository>> listAccessibleRepos() =>
+      _github.repositories.listRepositories(type: 'owner').toList();
+
+  /// Crea un nuevo repositorio privado vacío (con su propia rama de
+  /// revisión) y lo deja como Drive activo.
+  Future<void> createRepo(String name) async {
+    final repo = await _github.repositories.createRepository(
+      CreateRepository(
+        name,
+        description: 'Repositorio de datos de Versiona.',
+        private: true,
+        autoInit: true,
+        hasIssues: false,
+        hasWiki: false,
+      ),
+    );
+    _slug = RepositorySlug.full(repo.fullName);
+    _defaultBranch =
+        repo.defaultBranch.isNotEmpty ? repo.defaultBranch : 'main';
+    await _ensureReviewBranch();
+  }
+
+  /// Elimina un repositorio de GitHub de forma permanente e irreversible
+  /// (ficheros e historial incluidos). Requiere que el token tenga el
+  /// scope `delete_repo`. Quien llame a esto debe haber confirmado ya
+  /// explícitamente con el usuario: no hay marcha atrás.
+  Future<void> deleteRepo(RepositorySlug target) async {
+    await _github.repositories.deleteRepository(target);
+  }
+
   Future<void> _ensureReviewBranch() async {
     try {
       await _github.git.getReference(slug, 'heads/$_workingBranch');

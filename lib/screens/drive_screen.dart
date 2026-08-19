@@ -1,5 +1,6 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:github/github.dart';
 import 'package:provider/provider.dart';
 
 import '../models/drive_entry.dart';
@@ -19,7 +20,8 @@ class DriveScreen extends StatelessWidget {
       create:
           (context) =>
               DriveController(context.read<AuthController>().driveService!)
-                ..load(),
+                ..load()
+                ..loadAvailableRepos(),
       child: const _DriveView(),
     );
   }
@@ -217,7 +219,7 @@ class _DriveView extends StatelessWidget {
         title: const Text('Versiona'),
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(36),
-          child: _StatusBar(auth: auth),
+          child: _StatusBar(auth: auth, drive: drive),
         ),
         actions: [
           PopupMenuButton<String>(
@@ -317,14 +319,15 @@ class _DriveView extends StatelessWidget {
 /// cambios ahora mismo?": modo demo vs. cuenta de GitHub real, y el
 /// repositorio activo.
 class _StatusBar extends StatelessWidget {
-  const _StatusBar({required this.auth});
+  const _StatusBar({required this.auth, required this.drive});
 
   final AuthController auth;
+  final DriveController drive;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final repoName = auth.activeRepoName;
+    final repoName = drive.activeRepoName;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -351,16 +354,307 @@ class _StatusBar extends StatelessWidget {
             ),
             if (repoName != null) ...[
               const SizedBox(width: 8),
-              _StatusChip(
-                icon: Icons.storage_outlined,
-                label: repoName,
-                backgroundColor: colors.surfaceContainerHighest,
-                foregroundColor: colors.onSurfaceVariant,
-              ),
+              _RepoSwitcherChip(drive: drive, repoName: repoName),
             ],
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Chip del repositorio activo, convertido en menú desplegable: permite
+/// cambiar de "Drive" (p.ej. de "Tesorería" a "Facturas") sin salir de la
+/// pantalla. Solo lista repositorios propios del usuario (públicos y
+/// privados), tal y como los devuelve GitHub.
+/// Opción elegida en el menú del chip de repositorio: cambiar a uno
+/// existente, o abrir la gestión completa (crear / eliminar).
+sealed class _RepoMenuChoice {
+  const _RepoMenuChoice();
+}
+
+class _SwitchTo extends _RepoMenuChoice {
+  const _SwitchTo(this.repo);
+  final Repository repo;
+}
+
+class _OpenManage extends _RepoMenuChoice {
+  const _OpenManage();
+}
+
+class _RepoSwitcherChip extends StatelessWidget {
+  const _RepoSwitcherChip({required this.drive, required this.repoName});
+
+  final DriveController drive;
+  final String repoName;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+
+    return PopupMenuButton<_RepoMenuChoice>(
+      tooltip: 'Cambiar de repositorio',
+      enabled: !drive.loading,
+      onSelected: (choice) {
+        switch (choice) {
+          case _SwitchTo(:final repo):
+            drive.switchRepo(repo);
+          case _OpenManage():
+            showDialog(
+              context: context,
+              builder: (_) => _ManageReposDialog(drive: drive),
+            );
+        }
+      },
+      itemBuilder: (context) {
+        final items = <PopupMenuEntry<_RepoMenuChoice>>[];
+
+        if (drive.loadingRepos && drive.availableRepos.isEmpty) {
+          items.add(
+            const PopupMenuItem(
+              enabled: false,
+              child: SizedBox(
+                height: 20,
+                child: Center(
+                  child: SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              ),
+            ),
+          );
+        } else {
+          for (final repo in drive.availableRepos) {
+            items.add(
+              PopupMenuItem(
+                value: _SwitchTo(repo),
+                child: Row(
+                  children: [
+                    Icon(
+                      repo.isPrivate ? Icons.lock_outline : Icons.public,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(repo.name, overflow: TextOverflow.ellipsis),
+                    ),
+                    if (repo.name == repoName) ...[
+                      const SizedBox(width: 8),
+                      Icon(Icons.check, size: 16, color: colors.primary),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          }
+        }
+
+        items.add(const PopupMenuDivider());
+        items.add(
+          const PopupMenuItem(
+            value: _OpenManage(),
+            child: Row(
+              children: [
+                Icon(Icons.settings_outlined, size: 16),
+                SizedBox(width: 8),
+                Text('Gestionar repositorios...'),
+              ],
+            ),
+          ),
+        );
+
+        return items;
+      },
+      child: _StatusChip(
+        icon: Icons.storage_outlined,
+        label: repoName,
+        trailingIcon: Icons.arrow_drop_down,
+        backgroundColor: colors.surfaceContainerHighest,
+        foregroundColor: colors.onSurfaceVariant,
+      ),
+    );
+  }
+}
+
+/// Diálogo de gestión de repositorios: crear uno nuevo o eliminar uno
+/// existente. Eliminar es irreversible (borra ficheros e historial de
+/// GitHub para siempre), así que exige escribir el nombre exacto del
+/// repositorio antes de dejar pulsar "Eliminar" — igual que hace GitHub en
+/// su propia web, para que no se pueda borrar de un toque accidental.
+class _ManageReposDialog extends StatelessWidget {
+  const _ManageReposDialog({required this.drive});
+
+  final DriveController drive;
+
+  Future<void> _create(BuildContext context) async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Nuevo repositorio'),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'p. ej. facturas',
+              ),
+              onSubmitted: (v) => Navigator.of(context).pop(v),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(controller.text),
+                child: const Text('Crear'),
+              ),
+            ],
+          ),
+    );
+
+    final trimmed = name?.trim() ?? '';
+    if (trimmed.isEmpty) return;
+    if (!context.mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await drive.createRepo(trimmed);
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo crear el repositorio.'),
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmDelete(BuildContext context, Repository repo) async {
+    final nameController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (context) => StatefulBuilder(
+            builder: (context, setState) {
+              final matches = nameController.text.trim() == repo.name;
+              return AlertDialog(
+                title: Text('Eliminar "${repo.name}"'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Esto borra el repositorio de GitHub para siempre: '
+                      'todos los ficheros y su historial de versiones se '
+                      'perderán. No se puede deshacer.',
+                    ),
+                    const SizedBox(height: 16),
+                    Text('Escribe "${repo.name}" para confirmar:'),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: nameController,
+                      autofocus: true,
+                      onChanged: (_) => setState(() {}),
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('Cancelar'),
+                  ),
+                  FilledButton(
+                    onPressed:
+                        matches
+                            ? () => Navigator.of(context).pop(true)
+                            : null,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Theme.of(context).colorScheme.error,
+                      foregroundColor: Theme.of(context).colorScheme.onError,
+                    ),
+                    child: const Text('Eliminar definitivamente'),
+                  ),
+                ],
+              );
+            },
+          ),
+    );
+
+    if (confirmed != true) return;
+    if (!context.mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await drive.deleteRepo(repo);
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo eliminar el repositorio.'),
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Tus repositorios'),
+      content: SizedBox(
+        width: 420,
+        height: 360,
+        child: ListenableBuilder(
+          listenable: drive,
+          builder: (context, _) {
+            if (drive.loadingRepos && drive.availableRepos.isEmpty) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (drive.availableRepos.isEmpty) {
+              return const Center(
+                child: Text('Todavía no tienes ningún repositorio.'),
+              );
+            }
+            return ListView.separated(
+              itemCount: drive.availableRepos.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final repo = drive.availableRepos[index];
+                return ListTile(
+                  leading: Icon(
+                    repo.isPrivate ? Icons.lock_outline : Icons.public,
+                  ),
+                  title: Text(repo.name),
+                  trailing: IconButton(
+                    tooltip: 'Eliminar',
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () => _confirmDelete(context, repo),
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () => _create(context),
+          icon: const Icon(Icons.add),
+          label: const Text('Nuevo repositorio'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cerrar'),
+        ),
+      ],
     );
   }
 }
@@ -371,12 +665,14 @@ class _StatusChip extends StatelessWidget {
     required this.label,
     required this.backgroundColor,
     required this.foregroundColor,
+    this.trailingIcon,
   });
 
   final IconData icon;
   final String label;
   final Color backgroundColor;
   final Color foregroundColor;
+  final IconData? trailingIcon;
 
   @override
   Widget build(BuildContext context) {
@@ -397,6 +693,8 @@ class _StatusChip extends StatelessWidget {
               context,
             ).textTheme.labelSmall?.copyWith(color: foregroundColor),
           ),
+          if (trailingIcon != null)
+            Icon(trailingIcon, size: 16, color: foregroundColor),
         ],
       ),
     );

@@ -51,10 +51,6 @@ class AuthController extends ChangeNotifier {
   /// pantalla de login. Ver [GitHubConfig.demoPersonalAccessToken].
   bool get isDemoMode => GitHubConfig.isDemoMode;
 
-  /// Nombre del repositorio de GitHub donde se están guardando los
-  /// ficheros del usuario actual (p.ej. "versiona-drive").
-  String? get activeRepoName => driveService?.repoName;
-
   /// Se llama una vez al arrancar la app para reanudar la sesión si el
   /// usuario ya había conectado su cuenta anteriormente (o para entrar
   /// directamente si la app está en modo demo).
@@ -224,6 +220,12 @@ class AuthController extends ChangeNotifier {
       status = AuthStatus.signedIn;
       notifyListeners();
     } on GitHubError catch (e) {
+      // GitHub rechazó el token (revocado, expirado o sin permisos): no
+      // tiene sentido conservarlo, o cada arranque repetiría este mismo
+      // error en lugar de mostrar una pantalla de login limpia.
+      if (!isDemoMode) {
+        await _storage.clearToken();
+      }
       errorMessage =
           'No se pudo preparar tu espacio en GitHub: '
           '${e.message ?? e.runtimeType}';

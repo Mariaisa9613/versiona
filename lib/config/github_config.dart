@@ -55,8 +55,12 @@ class GitHubConfig {
       githubClientId != _placeholderClientId && githubClientId.isNotEmpty;
 
   /// Permisos solicitados: acceso completo a repos (privados incluidos)
-  /// para poder crear el repositorio de datos y leer/escribir ficheros.
-  static const String scopes = 'repo';
+  /// para poder crear el repositorio de datos y leer/escribir ficheros, más
+  /// "delete_repo" porque el menú "Gestionar repositorios" permite
+  /// eliminarlos desde la app. Si conectaste tu cuenta antes de añadirse
+  /// "delete_repo", cierra sesión y vuelve a conectar para que GitHub te
+  /// pida también ese permiso.
+  static const String scopes = 'repo delete_repo';
 
   /// Nombre del repositorio privado que la app crea automáticamente para
   /// guardar los ficheros del usuario.

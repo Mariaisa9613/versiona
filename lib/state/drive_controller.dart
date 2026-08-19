@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:github/github.dart';
 
 import '../models/drive_entry.dart';
 import '../models/file_version.dart';
@@ -18,6 +19,84 @@ class DriveController extends ChangeNotifier {
   bool loading = true;
   String? error;
   DriveViewMode viewMode = DriveViewMode.list;
+
+  String? get activeRepoName => _service.repoName;
+
+  List<Repository> availableRepos = [];
+  bool loadingRepos = false;
+
+  /// Carga la lista de repositorios del usuario para poder elegir entre
+  /// ellos como Drive activo. Se llama una vez al abrir el tablero; los
+  /// errores se ignoran en silencio porque no es una acción que el usuario
+  /// haya pedido explícitamente (el menú simplemente aparecerá vacío).
+  Future<void> loadAvailableRepos() async {
+    loadingRepos = true;
+    notifyListeners();
+    try {
+      availableRepos = await _service.listAccessibleRepos();
+    } catch (_) {
+      availableRepos = const [];
+    } finally {
+      loadingRepos = false;
+      notifyListeners();
+    }
+  }
+
+  /// Cambia el Drive activo a [repo] y recarga el tablero desde su raíz.
+  Future<void> switchRepo(Repository repo) async {
+    if (_service.repoName == repo.name) return;
+    loading = true;
+    error = null;
+    notifyListeners();
+
+    try {
+      await _service.switchTo(RepositorySlug.full(repo.fullName));
+      _pathSegments = [];
+      await load();
+    } catch (e) {
+      error = describeError(
+        e,
+        fallback: 'No se pudo cambiar al repositorio "${repo.name}".',
+      );
+      loading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Crea un nuevo repositorio y lo deja como Drive activo. Los fallos (p.ej.
+  /// nombre ya usado) se propagan tal cual: quien llame a esto está en un
+  /// diálogo propio con su propio manejo de errores, y no debe romper la
+  /// vista del repositorio que se estaba usando hasta ahora.
+  Future<void> createRepo(String name) async {
+    await _service.createRepo(name);
+    _pathSegments = [];
+    await loadAvailableRepos();
+    await load();
+  }
+
+  /// Elimina [repo] de GitHub de forma permanente. Si era el Drive activo,
+  /// cambia automáticamente a otro de los repositorios restantes (o deja el
+  /// tablero vacío con un aviso si no queda ninguno). Igual que
+  /// [createRepo], los fallos se propagan para que el diálogo que llama a
+  /// esto los muestre por su cuenta.
+  Future<void> deleteRepo(Repository repo) async {
+    await _service.deleteRepo(RepositorySlug.full(repo.fullName));
+
+    availableRepos =
+        availableRepos.where((r) => r.fullName != repo.fullName).toList();
+
+    if (_service.repoName == repo.name) {
+      if (availableRepos.isNotEmpty) {
+        await switchRepo(availableRepos.first);
+      } else {
+        entries = const [];
+        error =
+            'No te queda ningún repositorio. Crea uno nuevo para continuar.';
+        loading = false;
+      }
+    }
+    notifyListeners();
+  }
 
   void setViewMode(DriveViewMode mode) {
     if (viewMode == mode) return;
