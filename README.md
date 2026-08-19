@@ -27,6 +27,10 @@ Al conectar tu cuenta de GitHub (mediante el flujo de dispositivo OAuth, sin bac
 - [`github`](https://pub.dev/packages/github) para hablar con la API de GitHub
 - [`flutter_secure_storage`](https://pub.dev/packages/flutter_secure_storage) para la persistencia segura de la sesión
 
+## Descargas
+
+Cada push a `main` compila automáticamente la app y publica los binarios en la release [`build-latest`](https://github.com/Mariaisa9613/versiona/releases/tag/build-latest): siempre apunta a la última versión funcional, para macOS y Windows.
+
 ## Puesta en marcha
 
 ```bash
