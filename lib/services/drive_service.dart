@@ -370,6 +370,22 @@ class DriveService {
     return result;
   }
 
+  /// Contenido en bruto de [path] tal y como está en la rama de revisión,
+  /// para poder previsualizarlo (imagen, PDF, hoja de cálculo...) sin
+  /// necesidad de descargarlo primero.
+  Future<Uint8List> fetchFileBytes(String path) async {
+    final contents = await _github.repositories.getContents(
+      slug,
+      path,
+      ref: _workingBranch,
+    );
+    final content = contents.file?.content;
+    if (content == null) {
+      throw StateError('No se pudo leer el contenido de este fichero.');
+    }
+    return base64Decode(content.replaceAll('\n', ''));
+  }
+
   /// Historial de versiones (commits) que han afectado a [path], del más
   /// reciente al más antiguo.
   Future<List<FileVersion>> fileHistory(String path) async {

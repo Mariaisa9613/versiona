@@ -7,8 +7,10 @@ import 'package:provider/provider.dart';
 import '../models/drive_entry.dart';
 import '../state/auth_controller.dart';
 import '../state/drive_controller.dart';
+import '../utils/drive_entry_icons.dart';
 import '../utils/error_messages.dart';
 import '../utils/repo_naming.dart';
+import '../widgets/file_preview_dialog.dart';
 import '../widgets/review_status_badge.dart';
 import 'folder_picker_screen.dart';
 import 'version_history_screen.dart';
@@ -31,6 +33,18 @@ class DriveScreen extends StatelessWidget {
 
 class _DriveView extends StatelessWidget {
   const _DriveView();
+
+  void _openHistory(BuildContext context, DriveController drive, DriveEntry entry) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder:
+            (_) => ChangeNotifierProvider.value(
+              value: drive,
+              child: VersionHistoryScreen(entry: entry),
+            ),
+      ),
+    );
+  }
 
   Future<void> _uploadFile(BuildContext context) async {
     final drive = context.read<DriveController>();
@@ -283,15 +297,13 @@ class _DriveView extends StatelessWidget {
                 drive: drive,
                 onOpenFolder: (entry) => drive.openFolder(entry),
                 onOpenFile:
-                    (entry) => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder:
-                            (_) => ChangeNotifierProvider.value(
-                              value: drive,
-                              child: VersionHistoryScreen(entry: entry),
-                            ),
-                      ),
+                    (entry) => showFilePreview(
+                      context,
+                      entry: entry,
+                      drive: drive,
+                      onOpenHistory: () => _openHistory(context, drive, entry),
                     ),
+                onOpenHistory: (entry) => _openHistory(context, drive, entry),
                 onRename: (entry) => _renameEntry(context, entry),
                 onMove: (entry) => _moveEntry(context, entry),
                 onDelete: (entry) => _confirmDelete(context, entry),
@@ -979,40 +991,12 @@ class _Breadcrumbs extends StatelessWidget {
   }
 }
 
-/// Icono representativo de un fichero (según su extensión) o carpeta.
-/// Compartido entre la vista de lista y la de tablero.
-IconData iconForDriveEntry(DriveEntry entry) {
-  if (entry.isFolder) return Icons.folder_outlined;
-  final ext =
-      entry.name.contains('.') ? entry.name.split('.').last.toLowerCase() : '';
-  switch (ext) {
-    case 'pdf':
-      return Icons.picture_as_pdf_outlined;
-    case 'doc':
-    case 'docx':
-      return Icons.description_outlined;
-    case 'xls':
-    case 'xlsx':
-      return Icons.table_chart_outlined;
-    case 'jpg':
-    case 'jpeg':
-    case 'png':
-    case 'gif':
-    case 'webp':
-      return Icons.image_outlined;
-    case 'zip':
-    case 'rar':
-      return Icons.folder_zip_outlined;
-    default:
-      return Icons.insert_drive_file_outlined;
-  }
-}
-
 class _DriveBody extends StatelessWidget {
   const _DriveBody({
     required this.drive,
     required this.onOpenFolder,
     required this.onOpenFile,
+    required this.onOpenHistory,
     required this.onRename,
     required this.onMove,
     required this.onDelete,
@@ -1021,6 +1005,7 @@ class _DriveBody extends StatelessWidget {
   final DriveController drive;
   final ValueChanged<DriveEntry> onOpenFolder;
   final ValueChanged<DriveEntry> onOpenFile;
+  final ValueChanged<DriveEntry> onOpenHistory;
   final ValueChanged<DriveEntry> onRename;
   final ValueChanged<DriveEntry> onMove;
   final ValueChanged<DriveEntry> onDelete;
@@ -1081,7 +1066,7 @@ class _DriveBody extends StatelessWidget {
           subtitle:
               entry.isFolder
                   ? const Text('Carpeta')
-                  : const Text('Toca para ver el historial de versiones'),
+                  : const Text('Toca para previsualizarlo'),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1090,6 +1075,8 @@ class _DriveBody extends StatelessWidget {
               PopupMenuButton<String>(
                 onSelected: (value) {
                   switch (value) {
+                    case 'history':
+                      onOpenHistory(entry);
                     case 'rename':
                       onRename(entry);
                     case 'move':
@@ -1099,11 +1086,25 @@ class _DriveBody extends StatelessWidget {
                   }
                 },
                 itemBuilder:
-                    (context) => const [
-                      PopupMenuItem(value: 'rename', child: Text('Renombrar')),
-                      PopupMenuItem(value: 'move', child: Text('Mover a...')),
-                      PopupMenuDivider(),
-                      PopupMenuItem(value: 'delete', child: Text('Eliminar')),
+                    (context) => [
+                      if (!entry.isFolder)
+                        const PopupMenuItem(
+                          value: 'history',
+                          child: Text('Ver historial'),
+                        ),
+                      const PopupMenuItem(
+                        value: 'rename',
+                        child: Text('Renombrar'),
+                      ),
+                      const PopupMenuItem(
+                        value: 'move',
+                        child: Text('Mover a...'),
+                      ),
+                      const PopupMenuDivider(),
+                      const PopupMenuItem(
+                        value: 'delete',
+                        child: Text('Eliminar'),
+                      ),
                     ],
               ),
             ],

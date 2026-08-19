@@ -181,6 +181,9 @@ class DriveController extends ChangeNotifier {
   Future<List<FileVersion>> fileHistory(DriveEntry entry) =>
       _service.fileHistory(entry.path);
 
+  Future<Uint8List> fetchFileBytes(DriveEntry entry) =>
+      _service.fetchFileBytes(entry.path);
+
   Future<void> restoreVersion(DriveEntry entry, FileVersion version) async {
     await _service.restoreVersion(
       path: entry.path,
