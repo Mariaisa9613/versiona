@@ -1,6 +1,7 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:github/github.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/drive_entry.dart';
@@ -34,11 +35,16 @@ class _DriveView extends StatelessWidget {
   Future<void> _uploadFile(BuildContext context) async {
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
+    final currentUser = context.read<AuthController>().currentUser;
+    final userDisplayName =
+        (currentUser?.name?.trim().isNotEmpty ?? false)
+            ? currentUser!.name!.trim()
+            : (currentUser?.login ?? 'Alguien');
 
     final result = await showModalBottomSheet<(PlatformFile, String)>(
       context: context,
       isScrollControlled: true,
-      builder: (context) => const _UploadSheet(),
+      builder: (context) => _UploadSheet(userDisplayName: userDisplayName),
     );
     if (result == null) return;
 
@@ -741,9 +747,14 @@ class _StatusChip extends StatelessWidget {
 
 /// Formulario de subida: elegir un archivo y describir, en una frase, qué
 /// ha cambiado. Pensado para gente sin experiencia con control de
-/// versiones: "motivo del cambio" en vez de "mensaje de commit".
+/// versiones: "motivo del cambio" en vez de "mensaje de commit". El campo
+/// llega precargado con un mensaje automático ("Fulanito ha modificado
+/// factura.pdf el 19 ago 2026"), pero se puede editar libremente antes de
+/// subir.
 class _UploadSheet extends StatefulWidget {
-  const _UploadSheet();
+  const _UploadSheet({required this.userDisplayName});
+
+  final String userDisplayName;
 
   @override
   State<_UploadSheet> createState() => _UploadSheetState();
@@ -754,10 +765,20 @@ class _UploadSheetState extends State<_UploadSheet> {
   PlatformFile? _file;
   bool _picking = false;
 
+  /// Último mensaje generado automáticamente, para saber si el usuario lo
+  /// ha dejado tal cual (y así poder actualizarlo si cambia de fichero) o
+  /// si lo ha editado a mano (y entonces no tocarlo).
+  String _lastAutoMessage = '';
+
   @override
   void dispose() {
     _messageController.dispose();
     super.dispose();
+  }
+
+  String _autoMessageFor(String fileName) {
+    final date = DateFormat('d MMM y', 'es').format(DateTime.now());
+    return '${widget.userDisplayName} ha modificado $fileName el $date';
   }
 
   Future<void> _pickFile() async {
@@ -779,7 +800,16 @@ class _UploadSheetState extends State<_UploadSheet> {
         }
         return;
       }
-      setState(() => _file = picked);
+      setState(() {
+        _file = picked;
+        // Solo autorrellena si el usuario no ha escrito nada propio: si ya
+        // hay texto que no es el mensaje automático anterior, se respeta.
+        final currentText = _messageController.text.trim();
+        if (currentText.isEmpty || currentText == _lastAutoMessage.trim()) {
+          _lastAutoMessage = _autoMessageFor(picked.name);
+          _messageController.text = _lastAutoMessage;
+        }
+      });
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
