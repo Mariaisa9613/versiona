@@ -55,6 +55,8 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
                           AuthStatus.awaitingUserCode => _DeviceCodeCard(
                             auth: auth,
                           ),
+                          AuthStatus.choosingWorkspaceName =>
+                            _ChooseWorkspaceNameCard(auth: auth),
                           AuthStatus.preparingWorkspace =>
                             const _PreparingCard(),
                           _ => _WelcomeCard(auth: auth),
@@ -249,6 +251,103 @@ class _DeviceCodeCard extends StatelessWidget {
             child: const Text('Cancelar'),
           ),
         ],
+      ],
+    );
+  }
+}
+
+/// Paso previo a crear el primer espacio de Versiona en una cuenta: se
+/// muestra solo una vez, cuando no se encuentra ningún repositorio de
+/// Versiona ya existente. Deja elegir (o aceptar el sugerido) un nombre
+/// antes de crear nada, para no tocar en silencio los repos que el usuario
+/// ya tuviera en su cuenta.
+class _ChooseWorkspaceNameCard extends StatefulWidget {
+  const _ChooseWorkspaceNameCard({required this.auth});
+
+  final AuthController auth;
+
+  @override
+  State<_ChooseWorkspaceNameCard> createState() =>
+      _ChooseWorkspaceNameCardState();
+}
+
+class _ChooseWorkspaceNameCardState extends State<_ChooseWorkspaceNameCard> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.auth.suggestedWorkspaceName ?? '',
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _confirm() => widget.auth.confirmWorkspaceName(_controller.text);
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = widget.auth;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          Icons.drive_folder_upload_outlined,
+          size: 64,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'Ponle nombre a tu espacio',
+          style: Theme.of(context).textTheme.titleLarge,
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Es la primera vez que conectas esta cuenta: vamos a crear un '
+          'repositorio privado en tu GitHub para guardar tus ficheros. '
+          'Puedes usar el nombre que te sugerimos o poner el tuyo.',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 24),
+        TextField(
+          controller: _controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Nombre del espacio de trabajo',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => _confirm(),
+        ),
+        if (auth.errorMessage != null) ...[
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.errorContainer,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              auth.errorMessage!,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onErrorContainer,
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: 24),
+        FilledButton.icon(
+          onPressed: _confirm,
+          icon: const Icon(Icons.check),
+          label: const Text('Crear espacio'),
+          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+        ),
+        const SizedBox(height: 12),
+        TextButton(
+          onPressed: auth.cancelWorkspaceChoice,
+          child: const Text('Cancelar'),
+        ),
       ],
     );
   }

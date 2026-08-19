@@ -20,3 +20,13 @@ String slugifyRepoName(String input) {
   if (result.length > 90) result = result.substring(0, 90);
   return result;
 }
+
+/// Nombre de repositorio sugerido cuando el usuario no indica ninguno:
+/// combina su usuario de GitHub, "drive" y el año actual, p.ej.
+/// "maria-drive-2026".
+String autoWorkspaceName(String? username) {
+  final year = DateTime.now().year;
+  final owner =
+      (username == null || username.isEmpty) ? 'mi' : slugifyRepoName(username);
+  return '$owner-drive-$year';
+}

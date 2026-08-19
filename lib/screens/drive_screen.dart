@@ -506,14 +506,7 @@ class _ManageReposDialog extends StatelessWidget {
   /// uno inteligente a partir de su usuario y el año actual.
   String _resolveRepoName(String rawInput) {
     final slug = slugifyRepoName(rawInput);
-    if (slug.isNotEmpty) return slug;
-
-    final year = DateTime.now().year;
-    final owner =
-        (username == null || username!.isEmpty)
-            ? 'mi'
-            : slugifyRepoName(username!);
-    return '$owner-drive-$year';
+    return slug.isNotEmpty ? slug : autoWorkspaceName(username);
   }
 
   Future<void> _create(BuildContext context) async {

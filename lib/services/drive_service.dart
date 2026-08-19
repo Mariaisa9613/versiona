@@ -27,6 +27,11 @@ class DriveService {
 
   static const String _workingBranch = GitHubConfig.reviewBranchName;
 
+  /// Prefijo con el que Versiona marca la descripción de cada repositorio
+  /// que crea, para poder reconocerlos entre el resto de repos del usuario
+  /// (y así no confundir uno de sus proyectos con un espacio de Versiona).
+  static const String _workspaceMarker = '[Versiona]';
+
   RepositorySlug get slug {
     final s = _slug;
     if (s == null) {
@@ -61,7 +66,8 @@ class DriveService {
         CreateRepository(
           GitHubConfig.driveRepoName,
           description:
-              'Almacén de datos de Versiona. No lo edites manualmente.',
+              '$_workspaceMarker Almacén de datos de Versiona. No lo '
+              'edites manualmente.',
           private: true,
           autoInit: true,
           hasIssues: false,
@@ -93,13 +99,33 @@ class DriveService {
   Future<List<Repository>> listAccessibleRepos() =>
       _github.repositories.listRepositories(type: 'owner').toList();
 
+  /// Busca, entre los repositorios del usuario, uno ya creado por Versiona
+  /// anteriormente: por la marca en su descripción, o por el nombre fijo
+  /// que usaban las versiones antiguas de la app ([GitHubConfig.driveRepoName])
+  /// antes de que se pudiera elegir nombre — para no dejar huérfano el
+  /// espacio de quien ya usaba la app. Se usa al conectar una cuenta para
+  /// saber si hay que reanudar un espacio ya existente o si es la primera
+  /// vez y hace falta crear uno, sin arriesgarse nunca a confundir uno de
+  /// los proyectos propios del usuario con un espacio de Versiona.
+  Future<Repository?> findWorkspace() async {
+    final repos = await listAccessibleRepos();
+    for (final repo in repos) {
+      if (repo.description.startsWith(_workspaceMarker) ||
+          repo.name == GitHubConfig.driveRepoName) {
+        return repo;
+      }
+    }
+    return null;
+  }
+
   /// Crea un nuevo repositorio privado vacío (con su propia rama de
-  /// revisión) y lo deja como Drive activo.
+  /// revisión) y lo deja como Drive activo. Su descripción queda marcada
+  /// para que [findWorkspace] pueda reconocerlo más adelante.
   Future<void> createRepo(String name) async {
     final repo = await _github.repositories.createRepository(
       CreateRepository(
         name,
-        description: 'Repositorio de datos de Versiona.',
+        description: '$_workspaceMarker Espacio de datos de Versiona.',
         private: true,
         autoInit: true,
         hasIssues: false,

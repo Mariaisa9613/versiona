@@ -9,6 +9,7 @@ import '../services/drive_service.dart';
 import '../services/github_device_auth_service.dart';
 import '../services/secure_storage_service.dart';
 import '../utils/platform_info.dart';
+import '../utils/repo_naming.dart';
 
 enum AuthStatus {
   /// Comprobando si ya hay una sesión guardada en el dispositivo.
@@ -21,6 +22,11 @@ enum AuthStatus {
 
   /// Token obtenido; preparando el repositorio privado del usuario.
   preparingWorkspace,
+
+  /// Primera vez que se conecta esta cuenta: todavía no existe ningún
+  /// espacio de Versiona en ella, así que se espera a que el usuario
+  /// confirme (o cambie) el nombre sugerido antes de crear nada.
+  choosingWorkspaceName,
   signedIn,
 }
 
@@ -46,6 +52,18 @@ class AuthController extends ChangeNotifier {
   String? errorMessage;
   CurrentUser? currentUser;
   DriveService? driveService;
+
+  /// Nombre autogenerado que se ofrece como punto de partida en
+  /// [AuthStatus.choosingWorkspaceName]; el usuario puede aceptarlo tal
+  /// cual o escribir el suyo propio.
+  String? suggestedWorkspaceName;
+
+  // Datos de la sesión en curso mientras se espera a que el usuario elija
+  // el nombre del espacio (ver [AuthStatus.choosingWorkspaceName]).
+  DriveService? _pendingDrive;
+  CurrentUser? _pendingUser;
+  String? _pendingToken;
+  bool _pendingPersist = false;
 
   /// En modo demo todo el mundo entra con el mismo token compartido, sin
   /// pantalla de login. Ver [GitHubConfig.demoPersonalAccessToken].
@@ -209,15 +227,43 @@ class AuthController extends ChangeNotifier {
       final github = GitHub(auth: Authentication.withToken(token));
       final user = await github.users.getCurrentUser();
       final drive = DriveService(github);
-      await drive.ensureDriveRepo(user.login!);
 
-      if (persist) {
-        await _storage.saveToken(token);
+      if (isDemoMode) {
+        // El modo demo no debe tener ningún paso manual: todo el mundo
+        // comparte la misma cuenta y el mismo repo fijo.
+        await drive.ensureDriveRepo(user.login!);
+        currentUser = user;
+        driveService = drive;
+        status = AuthStatus.signedIn;
+        notifyListeners();
+        return;
       }
 
-      currentUser = user;
-      driveService = drive;
-      status = AuthStatus.signedIn;
+      final existingWorkspace = await drive.findWorkspace();
+      if (existingWorkspace != null) {
+        // Esta cuenta ya tiene un espacio de Versiona (creado antes, quizá
+        // desde otro dispositivo): lo reanudamos sin volver a preguntar.
+        await drive.switchTo(RepositorySlug.full(existingWorkspace.fullName));
+        if (persist) {
+          await _storage.saveToken(token);
+        }
+        currentUser = user;
+        driveService = drive;
+        status = AuthStatus.signedIn;
+        notifyListeners();
+        return;
+      }
+
+      // Primera vez que se conecta esta cuenta: no existe todavía ningún
+      // espacio de Versiona. Antes de crear nada, se deja que el usuario
+      // confirme o cambie el nombre sugerido — así nunca se toca en
+      // silencio uno de sus proyectos ya existentes.
+      _pendingDrive = drive;
+      _pendingUser = user;
+      _pendingToken = token;
+      _pendingPersist = persist;
+      suggestedWorkspaceName = autoWorkspaceName(user.login);
+      status = AuthStatus.choosingWorkspaceName;
       notifyListeners();
     } on GitHubError catch (e) {
       // GitHub rechazó el token (revocado, expirado o sin permisos): no
@@ -244,6 +290,65 @@ class AuthController extends ChangeNotifier {
       status = AuthStatus.signedOut;
       notifyListeners();
     }
+  }
+
+  /// Confirma (o sustituye) el nombre sugerido en
+  /// [AuthStatus.choosingWorkspaceName], crea el repositorio en GitHub y
+  /// completa el inicio de sesión. Si algo falla (p.ej. nombre en uso), se
+  /// vuelve a [AuthStatus.choosingWorkspaceName] para poder reintentar sin
+  /// perder el progreso del login.
+  Future<void> confirmWorkspaceName(String rawName) async {
+    final drive = _pendingDrive;
+    final user = _pendingUser;
+    final token = _pendingToken;
+    if (drive == null || user == null || token == null) return;
+
+    status = AuthStatus.preparingWorkspace;
+    errorMessage = null;
+    notifyListeners();
+
+    final slug = slugifyRepoName(rawName);
+    final name = slug.isEmpty ? autoWorkspaceName(user.login) : slug;
+
+    try {
+      await drive.createRepo(name);
+
+      if (_pendingPersist) {
+        await _storage.saveToken(token);
+      }
+
+      currentUser = user;
+      driveService = drive;
+      status = AuthStatus.signedIn;
+      _pendingDrive = null;
+      _pendingUser = null;
+      _pendingToken = null;
+      _pendingPersist = false;
+      suggestedWorkspaceName = null;
+    } on GitHubError catch (e) {
+      errorMessage =
+          'No se pudo crear "$name" en GitHub: ${e.message ?? e.runtimeType}';
+      status = AuthStatus.choosingWorkspaceName;
+    } catch (e) {
+      errorMessage =
+          'No se pudo crear tu espacio de trabajo. Comprueba tu conexión a '
+          'internet y vuelve a intentarlo. (${e.runtimeType})';
+      status = AuthStatus.choosingWorkspaceName;
+    }
+    notifyListeners();
+  }
+
+  /// Cancela la elección de nombre de espacio (p.ej. el usuario cierra el
+  /// paso): descarta el token obtenido y vuelve a la pantalla de login sin
+  /// haber creado ni guardado nada.
+  void cancelWorkspaceChoice() {
+    _pendingDrive = null;
+    _pendingUser = null;
+    _pendingToken = null;
+    _pendingPersist = false;
+    suggestedWorkspaceName = null;
+    status = AuthStatus.signedOut;
+    notifyListeners();
   }
 
   Future<void> signOut() async {
