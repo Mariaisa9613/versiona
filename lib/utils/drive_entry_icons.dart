@@ -13,15 +13,27 @@ IconData iconForDriveEntry(DriveEntry entry) {
       return Icons.picture_as_pdf_outlined;
     case 'doc':
     case 'docx':
+    case 'odt':
       return Icons.description_outlined;
     case 'xls':
     case 'xlsx':
+    case 'csv':
       return Icons.table_chart_outlined;
+    case 'ppt':
+    case 'pptx':
+    case 'odp':
+      return Icons.slideshow_outlined;
+    case 'txt':
+      return Icons.notes_outlined;
+    case 'md':
+    case 'markdown':
+      return Icons.article_outlined;
     case 'jpg':
     case 'jpeg':
     case 'png':
     case 'gif':
     case 'webp':
+    case 'bmp':
       return Icons.image_outlined;
     case 'zip':
     case 'rar':

@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:csv/csv.dart';
 import 'package:excel/excel.dart' as xls;
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:printing/printing.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -12,8 +13,23 @@ import '../models/drive_entry.dart';
 import '../state/drive_controller.dart';
 import '../utils/drive_entry_icons.dart';
 import '../utils/error_messages.dart';
+import '../utils/office_text_extractor.dart';
 
-enum _PreviewKind { image, pdf, csv, excel, unsupported }
+enum _PreviewKind {
+  image,
+  pdf,
+  csv,
+  excel,
+  text,
+  markdown,
+  wordDoc,
+  slides,
+
+  /// Formatos binarios antiguos de Office (.doc, .ppt, .xls): no hay forma
+  /// razonable de extraer su contenido sin una librería mucho más pesada.
+  legacyOffice,
+  unsupported,
+}
 
 _PreviewKind _kindFor(String fileName) {
   final ext =
@@ -33,6 +49,21 @@ _PreviewKind _kindFor(String fileName) {
     case 'xlsx':
     case 'xlsm':
       return _PreviewKind.excel;
+    case 'txt':
+      return _PreviewKind.text;
+    case 'md':
+    case 'markdown':
+      return _PreviewKind.markdown;
+    case 'docx':
+    case 'odt':
+      return _PreviewKind.wordDoc;
+    case 'pptx':
+    case 'odp':
+      return _PreviewKind.slides;
+    case 'doc':
+    case 'ppt':
+    case 'xls':
+      return _PreviewKind.legacyOffice;
     default:
       return _PreviewKind.unsupported;
   }
@@ -208,6 +239,21 @@ class _PreviewBody extends StatelessWidget {
         return _CsvPreview(bytes: bytes);
       case _PreviewKind.excel:
         return _ExcelPreview(bytes: bytes);
+      case _PreviewKind.text:
+        return _TextPreview(bytes: bytes);
+      case _PreviewKind.markdown:
+        return _MarkdownPreview(bytes: bytes);
+      case _PreviewKind.wordDoc:
+        return _WordDocPreview(fileName: fileName, bytes: bytes);
+      case _PreviewKind.slides:
+        return _SlidesPreview(fileName: fileName, bytes: bytes);
+      case _PreviewKind.legacyOffice:
+        return const _PreviewMessage(
+          icon: Icons.visibility_off_outlined,
+          message:
+              'Los formatos antiguos de Office (.doc, .ppt, .xls) no se '
+              'pueden previsualizar. Ábrelo en GitHub o descárgalo.',
+        );
       case _PreviewKind.unsupported:
         return const _PreviewMessage(
           icon: Icons.visibility_off_outlined,
@@ -216,6 +262,166 @@ class _PreviewBody extends StatelessWidget {
               'Puedes abrirlo en GitHub con el botón de arriba.',
         );
     }
+  }
+}
+
+class _TextPreview extends StatelessWidget {
+  const _TextPreview({required this.bytes});
+
+  final Uint8List bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = utf8.decode(bytes, allowMalformed: true);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: SelectableText(
+        text,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+          fontFamily: 'monospace',
+        ),
+      ),
+    );
+  }
+}
+
+class _MarkdownPreview extends StatelessWidget {
+  const _MarkdownPreview({required this.bytes});
+
+  final Uint8List bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = utf8.decode(bytes, allowMalformed: true);
+    return Markdown(
+      data: text,
+      padding: const EdgeInsets.all(20),
+      selectable: true,
+    );
+  }
+}
+
+/// Solo texto: sin negrita, cursiva, tablas ni imágenes. Suficiente para
+/// leer de un vistazo, no para reproducir el documento tal cual.
+class _WordDocPreview extends StatelessWidget {
+  const _WordDocPreview({required this.fileName, required this.bytes});
+
+  final String fileName;
+  final Uint8List bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    final String text;
+    try {
+      text =
+          fileName.toLowerCase().endsWith('.odt')
+              ? extractOdtText(bytes)
+              : extractDocxText(bytes);
+    } catch (e) {
+      return _PreviewMessage(
+        icon: Icons.error_outline,
+        message: describeError(e, fallback: 'No se pudo leer este documento.'),
+      );
+    }
+
+    if (text.trim().isEmpty) {
+      return const _PreviewMessage(
+        icon: Icons.description_outlined,
+        message: 'Este documento no tiene texto que mostrar.',
+      );
+    }
+
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          child: Text(
+            'Vista previa de solo texto: se han omitido el formato, las '
+            'imágenes y las tablas.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: SelectableText(text),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Texto de cada diapositiva, una tarjeta por diapositiva. Igual que
+/// [_WordDocPreview]: sin diseño, imágenes ni animaciones.
+class _SlidesPreview extends StatelessWidget {
+  const _SlidesPreview({required this.fileName, required this.bytes});
+
+  final String fileName;
+  final Uint8List bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<String> slides;
+    try {
+      slides =
+          fileName.toLowerCase().endsWith('.odp')
+              ? extractOdpSlidesText(bytes)
+              : extractPptxSlidesText(bytes);
+    } catch (e) {
+      return _PreviewMessage(
+        icon: Icons.error_outline,
+        message: describeError(
+          e,
+          fallback: 'No se pudo leer esta presentación.',
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          child: Text(
+            'Vista previa de solo texto: se han omitido el diseño, las '
+            'imágenes y las animaciones.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        Expanded(
+          child: ListView.separated(
+            padding: const EdgeInsets.all(20),
+            itemCount: slides.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 12),
+            itemBuilder: (context, index) {
+              final content = slides[index].trim();
+              return Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Diapositiva ${index + 1}',
+                        style: Theme.of(context).textTheme.labelLarge,
+                      ),
+                      const SizedBox(height: 8),
+                      SelectableText(
+                        content.isEmpty ? '(sin texto)' : content,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
   }
 }
 
