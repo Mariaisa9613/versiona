@@ -71,7 +71,7 @@ El secreto es una credencial privada: no debe pegarse en
 El repositorio incluye dos workflows que se ejecutan con cada `push` a `main`:
 
 - `.github/workflows/pages.yml` compila Flutter y publica la aplicación en
-  `https://mariaisa9613.github.io/versiona/` mediante GitHub Pages.
+  `https://versiona.site/` mediante GitHub Pages.
 - `.github/workflows/oauth-worker.yml` publica el proxy OAuth gratuito incluido
   en `oauth-worker/` mediante Cloudflare Workers.
 
@@ -89,7 +89,7 @@ Configuración inicial, una sola vez:
 5. En la pestaña **Variables** de Actions, crea `OAUTH_PROXY_URL` con la URL
    anterior seguida de `/oauth/token`.
 6. En la OAuth App de GitHub configura como callback exacto
-   `https://mariaisa9613.github.io/versiona/`.
+   `https://versiona.site/`.
 7. Ejecuta **Publicar Versiona Web**, o haz un nuevo `push` a `main`.
 
 Después de esta configuración, los siguientes despliegues son automáticos. El

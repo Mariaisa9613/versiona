@@ -5,5 +5,5 @@ workers_dev = true
 
 [vars]
 GITHUB_CLIENT_ID = "Ov23liV3MqUyzESsKWT9"
-ALLOWED_ORIGIN = "https://mariaisa9613.github.io"
-CALLBACK_URL = "https://mariaisa9613.github.io/versiona/"
+ALLOWED_ORIGIN = "https://versiona.site"
+CALLBACK_URL = "https://versiona.site/"

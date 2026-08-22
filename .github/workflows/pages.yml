@@ -40,7 +40,7 @@ jobs:
           OAUTH_PROXY_URL: ${{ vars.OAUTH_PROXY_URL }}
         run: >-
           flutter build web --release
-          --base-href /versiona/
+          --base-href /
           --dart-define=OAUTH_PROXY_URL=$OAUTH_PROXY_URL
 
       - name: Preparar GitHub Pages
