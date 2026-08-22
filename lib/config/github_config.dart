@@ -46,6 +46,14 @@ class GitHubConfig {
   /// Solo se usa cuando [demoPersonalAccessToken] es `null`.
   static const String githubClientId = 'Ov23liV3MqUyzESsKWT9';
 
+  /// URL del endpoint que intercambia el código OAuth por un token en web.
+  /// Se inyecta al compilar para no ligar la app a un despliegue concreto.
+  static const String webOAuthProxyUrl = String.fromEnvironment(
+    'OAUTH_PROXY_URL',
+  );
+
+  static bool get isWebOAuthConfigured => webOAuthProxyUrl.isNotEmpty;
+
   static const String _placeholderClientId = 'REEMPLAZA_CON_TU_CLIENT_ID';
 
   /// `false` mientras [githubClientId] siga siendo el valor de ejemplo: sin

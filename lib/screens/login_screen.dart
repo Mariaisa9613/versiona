@@ -75,7 +75,23 @@ class _LoginScreenState extends State<LoginScreen> with WidgetsBindingObserver {
 class _WelcomeCard extends StatelessWidget {
   const _WelcomeCard({required this.auth});
 
+  static final Uri _linkedInUrl = Uri.parse(
+    'https://www.linkedin.com/in/maria-isabel-martinez-lopez-126528127/',
+  );
+
   final AuthController auth;
+
+  Future<void> _openLinkedIn(BuildContext context) async {
+    final opened = await launchUrl(
+      _linkedInUrl,
+      mode: LaunchMode.externalApplication,
+    );
+    if (!opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo abrir LinkedIn.')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -93,43 +109,30 @@ class _WelcomeCard extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         Text(
+          'Acerca de',
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Creada por Maria Isabel Martinez Lopez',
+          textAlign: TextAlign.center,
+        ),
+        TextButton.icon(
+          onPressed: () => _openLinkedIn(context),
+          icon: const Icon(Icons.open_in_new, size: 18),
+          label: const Text('LinkedIn'),
+        ),
+        const SizedBox(height: 8),
+        Text(
           'Guarda tus ficheros y organízalos en carpetas con el historial '
           'de cambios de cada uno, sin complicaciones.',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodyMedium,
         ),
         const SizedBox(height: 32),
-        if (!isGitHubLoginSupportedOnThisPlatform) ...[
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.tertiaryContainer,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.info_outline,
-                  size: 20,
-                  color: Theme.of(context).colorScheme.onTertiaryContainer,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'La conexión con GitHub no está disponible en el '
-                    'navegador. Abre Versiona como app de escritorio o '
-                    'móvil para conectar tu cuenta.',
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onTertiaryContainer,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-        ] else if (auth.errorMessage != null) ...[
+        if (auth.errorMessage != null) ...[
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(

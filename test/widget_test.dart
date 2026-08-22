@@ -25,6 +25,12 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Versiona'), findsOneWidget);
+      expect(find.text('Acerca de'), findsOneWidget);
+      expect(
+        find.text('Creada por Maria Isabel Martinez Lopez'),
+        findsOneWidget,
+      );
+      expect(find.text('LinkedIn'), findsOneWidget);
       expect(find.text('Conectar con GitHub'), findsOneWidget);
     },
   );

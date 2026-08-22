@@ -1,0 +1,9 @@
+name = "versiona-oauth"
+main = "src/index.js"
+compatibility_date = "2026-08-22"
+workers_dev = true
+
+[vars]
+GITHUB_CLIENT_ID = "Ov23liV3MqUyzESsKWT9"
+ALLOWED_ORIGIN = "https://mariaisa9613.github.io"
+CALLBACK_URL = "https://mariaisa9613.github.io/versiona/"

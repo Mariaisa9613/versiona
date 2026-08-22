@@ -1,0 +1,63 @@
+name: Publicar Versiona Web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Instalar dependencias
+        run: flutter pub get
+
+      - name: Comprobar la URL del proxy OAuth
+        env:
+          OAUTH_PROXY_URL: ${{ vars.OAUTH_PROXY_URL }}
+        run: test -n "$OAUTH_PROXY_URL"
+
+      - name: Compilar Flutter Web
+        env:
+          OAUTH_PROXY_URL: ${{ vars.OAUTH_PROXY_URL }}
+        run: >-
+          flutter build web --release
+          --base-href /versiona/
+          --dart-define=OAUTH_PROXY_URL=$OAUTH_PROXY_URL
+
+      - name: Preparar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Subir la web compilada
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publicar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

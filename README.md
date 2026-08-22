@@ -40,6 +40,62 @@ flutter run
 
 Para conectar cuentas reales de GitHub hace falta configurar tu propia OAuth App con Device Flow habilitado — las instrucciones completas están en [`lib/config/github_config.dart`](lib/config/github_config.dart). También existe un modo demo con un token compartido para probar la app sin ese paso.
 
+### Ejecutar en Chrome con acceso a GitHub
+
+En web, Versiona usa el flujo OAuth web con PKCE. El intercambio final del
+código necesita el pequeño proxy incluido en `tool/oauth_proxy.dart`, porque
+el `client secret` nunca debe incluirse dentro de JavaScript.
+
+1. En la OAuth App de GitHub usada por Versiona, añade como **Authorization
+   callback URL** `http://localhost:8080/` y genera un **Client secret**.
+2. Abre un terminal, define el secreto solo para esa sesión y arranca el proxy:
+
+   ```bash
+   export OAUTH_CLIENT_SECRET='TU_SECRETO_DE_GITHUB'
+   dart run tool/oauth_proxy.dart
+   ```
+
+3. En otro terminal, arranca Flutter con un puerto fijo y la URL del proxy:
+
+   ```bash
+   flutter run -d chrome --web-port 8080 \
+     --dart-define=OAUTH_PROXY_URL=http://localhost:8787/oauth/token
+   ```
+
+El secreto es una credencial privada: no debe pegarse en
+`lib/config/github_config.dart`, subirse a Git ni pasarse mediante
+`--dart-define`.
+
+### Publicación automática gratuita
+
+El repositorio incluye dos workflows que se ejecutan con cada `push` a `main`:
+
+- `.github/workflows/pages.yml` compila Flutter y publica la aplicación en
+  `https://mariaisa9613.github.io/versiona/` mediante GitHub Pages.
+- `.github/workflows/oauth-worker.yml` publica el proxy OAuth gratuito incluido
+  en `oauth-worker/` mediante Cloudflare Workers.
+
+Configuración inicial, una sola vez:
+
+1. En **GitHub → repositorio Versiona → Settings → Pages**, selecciona
+   **GitHub Actions** como origen.
+2. Crea una cuenta gratuita en Cloudflare y obtén un API Token con permiso
+   **Workers Scripts: Edit** y el Account ID.
+3. En **GitHub → Settings → Secrets and variables → Actions → Secrets**, crea:
+   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` y
+   `OAUTH_CLIENT_SECRET`.
+4. Ejecuta manualmente el workflow **Publicar proxy OAuth**. Cloudflare le dará
+   una URL parecida a `https://versiona-oauth.<subdominio>.workers.dev`.
+5. En la pestaña **Variables** de Actions, crea `OAUTH_PROXY_URL` con la URL
+   anterior seguida de `/oauth/token`.
+6. En la OAuth App de GitHub configura como callback exacto
+   `https://mariaisa9613.github.io/versiona/`.
+7. Ejecuta **Publicar Versiona Web**, o haz un nuevo `push` a `main`.
+
+Después de esta configuración, los siguientes despliegues son automáticos. El
+Client secret permanece cifrado en GitHub Actions y como secreto del Worker; no
+forma parte de la aplicación web ni del historial Git.
+
 ## Licencia
 
 [MIT](LICENSE)

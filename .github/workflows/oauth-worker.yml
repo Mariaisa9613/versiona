@@ -1,0 +1,33 @@
+name: Publicar proxy OAuth
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - oauth-worker/**
+      - .github/workflows/oauth-worker.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Validar el Worker
+        run: node --check oauth-worker/src/index.js
+
+      - name: Publicar en Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: oauth-worker
+          secrets: |
+            OAUTH_CLIENT_SECRET
+        env:
+          OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}

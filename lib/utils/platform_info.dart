@@ -8,10 +8,6 @@ bool get isMobilePlatform =>
     (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS);
 
-/// GitHub no envía cabeceras CORS en los endpoints del Device Flow
-/// (`/login/device/code`, `/login/oauth/access_token`): un navegador los
-/// bloquea antes de que la petición llegue a ningún sitio. No hay forma de
-/// evitarlo desde una app 100% cliente sin un servidor intermedio, así que
-/// el login real de GitHub solo puede funcionar en las apps nativas
-/// (Android, iOS, macOS, Windows, Linux), nunca en la versión web.
-bool get isGitHubLoginSupportedOnThisPlatform => !kIsWeb;
+/// Las apps nativas usan Device Flow y la web usa Authorization Code + PKCE
+/// mediante el proxy OAuth configurado al compilar.
+bool get isGitHubLoginSupportedOnThisPlatform => true;

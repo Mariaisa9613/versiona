@@ -7,8 +7,8 @@ import 'package:github/github.dart';
 import '../config/github_config.dart';
 import '../services/drive_service.dart';
 import '../services/github_device_auth_service.dart';
+import '../services/github_web_auth_service.dart';
 import '../services/secure_storage_service.dart';
-import '../utils/platform_info.dart';
 import '../utils/repo_naming.dart';
 
 enum AuthStatus {
@@ -36,11 +36,14 @@ class AuthController extends ChangeNotifier {
   AuthController({
     SecureStorageService? storage,
     GitHubDeviceAuthService? deviceAuth,
+    GitHubWebAuthService? webAuth,
   }) : _storage = storage ?? SecureStorageService(),
-       _deviceAuth = deviceAuth ?? GitHubDeviceAuthService();
+       _deviceAuth = deviceAuth ?? GitHubDeviceAuthService(),
+       _webAuth = webAuth ?? GitHubWebAuthService();
 
   final SecureStorageService _storage;
   final GitHubDeviceAuthService _deviceAuth;
+  final GitHubWebAuthService _webAuth;
 
   Timer? _pollTimer;
   DeviceCodeRequest? _activeRequest;
@@ -81,6 +84,23 @@ class AuthController extends ChangeNotifier {
       return;
     }
 
+    if (kIsWeb && _webAuth.hasCallback) {
+      status = AuthStatus.preparingWorkspace;
+      notifyListeners();
+      try {
+        final token = await _webAuth.completeCallback();
+        if (token != null) {
+          await _completeSignIn(token, persist: true);
+          return;
+        }
+      } on WebAuthException catch (e) {
+        errorMessage = e.message;
+        status = AuthStatus.signedOut;
+        notifyListeners();
+        return;
+      }
+    }
+
     final token = await _storage.readToken();
     if (token == null) {
       status = AuthStatus.signedOut;
@@ -91,17 +111,6 @@ class AuthController extends ChangeNotifier {
   }
 
   Future<void> startSignIn() async {
-    if (!isGitHubLoginSupportedOnThisPlatform) {
-      errorMessage =
-          'La conexión con GitHub no está disponible en el navegador '
-          '(GitHub bloquea estas peticiones desde webs por seguridad). '
-          'Abre Versiona como app de escritorio o móvil para conectar tu '
-          'cuenta.';
-      status = AuthStatus.signedOut;
-      notifyListeners();
-      return;
-    }
-
     if (!GitHubConfig.isGitHubClientIdConfigured) {
       errorMessage =
           'Falta configurar el Client ID de GitHub en '
@@ -109,6 +118,20 @@ class AuthController extends ChangeNotifier {
           'conectar cuentas. Revisa las instrucciones en ese fichero.';
       status = AuthStatus.signedOut;
       notifyListeners();
+      return;
+    }
+
+    if (kIsWeb) {
+      errorMessage = null;
+      status = AuthStatus.preparingWorkspace;
+      notifyListeners();
+      try {
+        await _webAuth.startAuthorization();
+      } on WebAuthException catch (e) {
+        errorMessage = e.message;
+        status = AuthStatus.signedOut;
+        notifyListeners();
+      }
       return;
     }
 
