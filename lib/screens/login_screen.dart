@@ -131,6 +131,15 @@ class _WelcomeCard extends StatelessWidget {
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodyMedium,
         ),
+        const SizedBox(height: 8),
+        Text(
+          'Tus copias se guardan de forma privada y gratuita con GitHub, '
+          'el servicio de almacenamiento seguro que usamos por debajo.',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
         const SizedBox(height: 32),
         if (auth.errorMessage != null) ...[
           Container(
@@ -151,8 +160,8 @@ class _WelcomeCard extends StatelessWidget {
         FilledButton.icon(
           onPressed:
               isGitHubLoginSupportedOnThisPlatform ? auth.startSignIn : null,
-          icon: const Icon(Icons.link),
-          label: const Text('Conectar con GitHub'),
+          icon: const Icon(Icons.arrow_forward),
+          label: const Text('Continuar con GitHub'),
           style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
         ),
       ],
@@ -173,7 +182,7 @@ class _DeviceCodeCard extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          'Introduce este código en GitHub',
+          'Confirma tu código para activar tu cuenta',
           style: Theme.of(context).textTheme.titleLarge,
           textAlign: TextAlign.center,
         ),
@@ -181,10 +190,11 @@ class _DeviceCodeCard extends StatelessWidget {
         Text(
           isMobilePlatform
               ? 'Hemos copiado el código. Se abrirá una ventana dentro de '
-                  'la app: solo tienes que pegarlo para autorizar el '
-                  'acceso de Versiona.'
-              : 'Hemos copiado el código. Se abrirá tu navegador: pégalo '
-                  'para autorizar el acceso de Versiona.',
+                  'la app, en la página segura de GitHub: solo tienes que '
+                  'pegarlo para activar tu cuenta de Versiona.'
+              : 'Hemos copiado el código. Se abrirá tu navegador, en la '
+                  'página segura de GitHub: pégalo para activar tu cuenta '
+                  'de Versiona.',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodyMedium,
         ),
@@ -232,7 +242,7 @@ class _DeviceCodeCard extends StatelessWidget {
                           : LaunchMode.externalApplication,
                 ),
             icon: const Icon(Icons.open_in_new),
-            label: const Text('Abrir GitHub'),
+            label: const Text('Confirmar código'),
             style: FilledButton.styleFrom(
               minimumSize: const Size.fromHeight(48),
             ),
@@ -309,9 +319,9 @@ class _ChooseWorkspaceNameCardState extends State<_ChooseWorkspaceNameCard> {
         ),
         const SizedBox(height: 8),
         Text(
-          'Es la primera vez que conectas esta cuenta: vamos a crear un '
-          'repositorio privado en tu GitHub para guardar tus ficheros. '
-          'Puedes usar el nombre que te sugerimos o poner el tuyo.',
+          'Es la primera vez que usas esta cuenta: vamos a crear tu espacio '
+          'privado en Versiona para guardar tus ficheros. Puedes usar el '
+          'nombre que te sugerimos o poner el tuyo.',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodyMedium,
         ),

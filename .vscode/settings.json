@@ -1,0 +1,6 @@
+{
+  "dart.flutterRunAdditionalArgs": [
+    "--web-port=8080",
+    "--dart-define=OAUTH_PROXY_URL=http://localhost:8787/oauth/token"
+  ]
+}

@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:github/github.dart';
+import 'package:http/http.dart' as http;
 
 import '../config/github_config.dart';
 import '../services/drive_service.dart';
 import '../services/github_device_auth_service.dart';
 import '../services/github_web_auth_service.dart';
+import '../services/logging_github_client.dart';
 import '../services/secure_storage_service.dart';
 import '../utils/repo_naming.dart';
 
@@ -246,8 +248,12 @@ class AuthController extends ChangeNotifier {
     status = AuthStatus.preparingWorkspace;
     notifyListeners();
 
+    final httpClient = LoggingGitHubClient(http.Client());
     try {
-      final github = GitHub(auth: Authentication.withToken(token));
+      final github = GitHub(
+        auth: Authentication.withToken(token),
+        client: httpClient,
+      );
       final user = await github.users.getCurrentUser();
       final drive = DriveService(github);
 
@@ -295,9 +301,17 @@ class AuthController extends ChangeNotifier {
       if (!isDemoMode) {
         await _storage.clearToken();
       }
-      errorMessage =
-          'No se pudo preparar tu espacio en GitHub: '
-          '${e.message ?? e.runtimeType}';
+      final httpStatus = httpClient.lastErrorStatusCode;
+      // El paquete `github` convierte cualquier 401 en la excepción
+      // `AccessForbidden`, con el mensaje fijo "Access Forbidden" (no el
+      // motivo real de GitHub). Como esta rama ya borra el token inválido,
+      // basta con pedir al usuario que vuelva a conectar su cuenta.
+      errorMessage = httpStatus == 401
+          ? 'Tu sesión de GitHub ha caducado o fue revocada. Vuelve a '
+                'conectar tu cuenta para seguir usando Versiona.'
+          : 'No se pudo preparar tu espacio en GitHub: '
+                '${e.message ?? e.runtimeType}'
+                '${httpStatus != null ? ' (HTTP $httpStatus)' : ''}';
       status = AuthStatus.signedOut;
       notifyListeners();
     } on PlatformException catch (e) {

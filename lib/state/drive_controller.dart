@@ -20,6 +20,11 @@ class DriveController extends ChangeNotifier {
   String? error;
   DriveViewMode viewMode = DriveViewMode.list;
 
+  /// Si hay una subida de fichero en curso ahora mismo, para poder mostrar
+  /// un indicador de espera (p. ej. al fotografiar un ticket con conexión
+  /// lenta).
+  bool uploading = false;
+
   String? get activeRepoName => _service.repoName;
 
   List<Repository> availableRepos = [];
@@ -144,13 +149,20 @@ class DriveController extends ChangeNotifier {
     List<int> bytes, {
     String? commitMessage,
   }) async {
-    await _service.uploadFile(
-      folderPath: currentPath,
-      fileName: fileName,
-      bytes: bytes,
-      commitMessage: commitMessage,
-    );
-    await load();
+    uploading = true;
+    notifyListeners();
+    try {
+      await _service.uploadFile(
+        folderPath: currentPath,
+        fileName: fileName,
+        bytes: bytes,
+        commitMessage: commitMessage,
+      );
+      await load();
+    } finally {
+      uploading = false;
+      notifyListeners();
+    }
   }
 
   Future<void> createFolder(String name) async {

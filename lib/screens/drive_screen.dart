@@ -1,10 +1,12 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:github/github.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/drive_entry.dart';
+import '../services/ticket_capture_service.dart';
 import '../state/auth_controller.dart';
 import '../state/drive_controller.dart';
 import '../utils/drive_entry_icons.dart';
@@ -14,6 +16,10 @@ import '../widgets/file_preview_dialog.dart';
 import '../widgets/review_status_badge.dart';
 import 'folder_picker_screen.dart';
 import 'version_history_screen.dart';
+
+/// Prefijo de nombre que marca un fichero como ticket fotografiado desde la
+/// cámara, para poder distinguirlo visualmente en el tablero Kanban.
+const _ticketFilePrefix = 'TICKET_';
 
 class DriveScreen extends StatelessWidget {
   const DriveScreen({super.key});
@@ -72,6 +78,49 @@ class _DriveView extends StatelessWidget {
         SnackBar(
           content: Text(
             describeError(e, fallback: 'No se pudo subir el fichero.'),
+          ),
+        ),
+      );
+    }
+  }
+
+  /// Abre la cámara, comprime la foto y la sube directamente a la carpeta
+  /// actual como un nuevo ticket. Al entrar por la rama de revisión, aparece
+  /// enseguida en la columna "Pendiente de validación" del tablero.
+  Future<void> _captureTicket(BuildContext context) async {
+    final drive = context.read<DriveController>();
+    final messenger = ScaffoldMessenger.of(context);
+    final ticketService = TicketCaptureService();
+
+    final XFile? photo;
+    try {
+      photo = await ticketService.capturarTicket();
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo abrir la cámara.'),
+          ),
+        ),
+      );
+      return;
+    }
+    if (photo == null) return; // El usuario canceló la foto.
+
+    final bytes = await photo.readAsBytes();
+    final fileName = ticketService.nombreTicket();
+
+    try {
+      await drive.uploadFile(
+        fileName,
+        bytes,
+        commitMessage: 'Ticket fotografiado desde el móvil',
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo subir el ticket.'),
           ),
         ),
       );
@@ -280,36 +329,43 @@ class _DriveView extends StatelessWidget {
           const SizedBox(width: 8),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          Row(
+          Column(
             children: [
-              Expanded(child: _Breadcrumbs(drive: drive)),
-              _ViewModeToggle(drive: drive),
-              const SizedBox(width: 12),
+              Row(
+                children: [
+                  Expanded(child: _Breadcrumbs(drive: drive)),
+                  _ViewModeToggle(drive: drive),
+                  const SizedBox(width: 12),
+                ],
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: RefreshIndicator(
+                  onRefresh: drive.load,
+                  child: _DriveBody(
+                    drive: drive,
+                    onOpenFolder: (entry) => drive.openFolder(entry),
+                    onOpenFile:
+                        (entry) => showFilePreview(
+                          context,
+                          entry: entry,
+                          drive: drive,
+                          onOpenHistory:
+                              () => _openHistory(context, drive, entry),
+                        ),
+                    onOpenHistory:
+                        (entry) => _openHistory(context, drive, entry),
+                    onRename: (entry) => _renameEntry(context, entry),
+                    onMove: (entry) => _moveEntry(context, entry),
+                    onDelete: (entry) => _confirmDelete(context, entry),
+                  ),
+                ),
+              ),
             ],
           ),
-          const Divider(height: 1),
-          Expanded(
-            child: RefreshIndicator(
-              onRefresh: drive.load,
-              child: _DriveBody(
-                drive: drive,
-                onOpenFolder: (entry) => drive.openFolder(entry),
-                onOpenFile:
-                    (entry) => showFilePreview(
-                      context,
-                      entry: entry,
-                      drive: drive,
-                      onOpenHistory: () => _openHistory(context, drive, entry),
-                    ),
-                onOpenHistory: (entry) => _openHistory(context, drive, entry),
-                onRename: (entry) => _renameEntry(context, entry),
-                onMove: (entry) => _moveEntry(context, entry),
-                onDelete: (entry) => _confirmDelete(context, entry),
-              ),
-            ),
-          ),
+          if (drive.uploading) const _UploadingOverlay(),
         ],
       ),
       floatingActionButton: Row(
@@ -323,12 +379,81 @@ class _DriveView extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           FloatingActionButton.extended(
+            heroTag: 'ticket',
+            onPressed: drive.uploading ? null : () => _captureTicket(context),
+            icon: const Icon(Icons.camera_alt_outlined),
+            label: const Text('Ticket'),
+            backgroundColor: Colors.deepPurple,
+            foregroundColor: Colors.white,
+          ),
+          const SizedBox(width: 12),
+          FloatingActionButton.extended(
             heroTag: 'upload',
-            onPressed: () => _uploadFile(context),
+            onPressed: drive.uploading ? null : () => _uploadFile(context),
             icon: const Icon(Icons.upload_file_outlined),
             label: const Text('Subir'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Overlay a pantalla completa con un reloj de arena girando, para que la
+/// espera durante una subida (ticket fotografiado o fichero) no parezca que
+/// la app se ha quedado colgada. Bloquea la interacción con el resto de la
+/// pantalla mientras dura.
+class _UploadingOverlay extends StatefulWidget {
+  const _UploadingOverlay();
+
+  @override
+  State<_UploadingOverlay> createState() => _UploadingOverlayState();
+}
+
+class _UploadingOverlayState extends State<_UploadingOverlay>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: Colors.black.withValues(alpha: 0.35),
+        child: Center(
+          child: Card(
+            elevation: 6,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 32,
+                vertical: 24,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  RotationTransition(
+                    turns: _controller,
+                    child: const Icon(
+                      Icons.hourglass_bottom,
+                      size: 40,
+                      color: Colors.deepPurple,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('Subiendo...'),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1265,6 +1390,8 @@ class _KanbanCard extends StatelessWidget {
   final DriveEntry entry;
   final VoidCallback onTap;
 
+  bool get _isTicket => entry.name.startsWith(_ticketFilePrefix);
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -1274,16 +1401,42 @@ class _KanbanCard extends StatelessWidget {
         onTap: onTap,
         child: Padding(
           padding: const EdgeInsets.all(12),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                iconForDriveEntry(entry),
-                color: Theme.of(context).colorScheme.primary,
+              Row(
+                children: [
+                  Icon(
+                    iconForDriveEntry(entry),
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(entry.name, overflow: TextOverflow.ellipsis),
+                  ),
+                ],
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(entry.name, overflow: TextOverflow.ellipsis),
-              ),
+              if (_isTicket) ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.deepPurple.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Text(
+                    '[Ticket]',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.deepPurple,
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
