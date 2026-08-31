@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import '../models/drive_entry.dart';
 import '../services/ticket_capture_service.dart';
+import '../services/ticket_ocr_service.dart';
 import '../state/auth_controller.dart';
 import '../state/drive_controller.dart';
 import '../utils/drive_entry_icons.dart';
@@ -87,6 +88,10 @@ class _DriveView extends StatelessWidget {
   /// Abre la cámara, comprime la foto y la sube directamente a la carpeta
   /// actual como un nuevo ticket. Al entrar por la rama de revisión, aparece
   /// enseguida en la columna "Pendiente de validación" del tablero.
+  ///
+  /// Antes de subir, intenta reconocer el texto del ticket on-device (ML
+  /// Kit, sin conexión) para incluirlo en el mensaje de commit. En web, o si
+  /// el reconocimiento falla, se sube igualmente con el mensaje por defecto.
   Future<void> _captureTicket(BuildContext context) async {
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
@@ -109,13 +114,15 @@ class _DriveView extends StatelessWidget {
 
     final bytes = await photo.readAsBytes();
     final fileName = ticketService.nombreTicket();
+    final extractedText = await TicketOcrService().extractText(photo.path);
+
+    final commitMessage =
+        extractedText == null
+            ? 'Ticket fotografiado desde el móvil'
+            : 'Ticket fotografiado desde el móvil\n\n$extractedText';
 
     try {
-      await drive.uploadFile(
-        fileName,
-        bytes,
-        commitMessage: 'Ticket fotografiado desde el móvil',
-      );
+      await drive.uploadFile(fileName, bytes, commitMessage: commitMessage);
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(
