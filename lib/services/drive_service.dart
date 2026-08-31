@@ -165,13 +165,39 @@ class DriveService {
   String _joinPath(String folderPath, String name) =>
       folderPath.isEmpty ? name : '$folderPath/$name';
 
+  /// Espera entre reintentos al releer justo después de escribir. La API de
+  /// "contents" de GitHub es eventualmente consistente: leerla enseguida
+  /// después de uno o varios commits seguidos (p. ej. al mover una carpeta
+  /// con varios ficheros) puede devolver un 404 aunque el commit ya se haya
+  /// guardado. `getContents()` tampoco conserva el código HTTP real, así que
+  /// llega como [GitHubError] genérico en vez de un [NotFound] tipado.
+  static const _transientRetryDelays = [
+    Duration(milliseconds: 400),
+    Duration(milliseconds: 900),
+  ];
+
+  Future<T> _withRetryOnTransientNotFound<T>(
+    Future<T> Function() action,
+  ) async {
+    for (var attempt = 0; ; attempt++) {
+      try {
+        return await action();
+      } on GitHubError {
+        if (attempt >= _transientRetryDelays.length) rethrow;
+        await Future.delayed(_transientRetryDelays[attempt]);
+      }
+    }
+  }
+
   /// Lista el contenido (ficheros y carpetas) de [folderPath], con el
   /// estado de aprobación de cada uno. Usa cadena vacía para la raíz.
   Future<List<DriveEntry>> listFolder(String folderPath) async {
-    final contents = await _github.repositories.getContents(
-      slug,
-      folderPath,
-      ref: _workingBranch,
+    final contents = await _withRetryOnTransientNotFound(
+      () => _github.repositories.getContents(
+        slug,
+        folderPath,
+        ref: _workingBranch,
+      ),
     );
 
     if (contents.isFile) {
