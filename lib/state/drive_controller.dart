@@ -121,11 +121,13 @@ class DriveController extends ChangeNotifier {
     try {
       entries = await _service.listFolder(currentPath);
     } catch (e) {
+      // Si ya había una lista válida (p. ej. recargando tras subir un
+      // fichero), la conservamos en vez de vaciarla: un fallo transitorio
+      // al releer no debería hacer desaparecer contenido que sí se guardó.
       error = describeError(
         e,
         fallback: 'No se pudo cargar el contenido de esta carpeta.',
       );
-      entries = const [];
     } finally {
       loading = false;
       notifyListeners();

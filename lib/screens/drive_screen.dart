@@ -41,7 +41,11 @@ class DriveScreen extends StatelessWidget {
 class _DriveView extends StatelessWidget {
   const _DriveView();
 
-  void _openHistory(BuildContext context, DriveController drive, DriveEntry entry) {
+  void _openHistory(
+    BuildContext context,
+    DriveController drive,
+    DriveEntry entry,
+  ) {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder:
@@ -74,6 +78,7 @@ class _DriveView extends StatelessWidget {
 
     try {
       await drive.uploadFile(file.name, file.bytes!, commitMessage: message);
+      _warnIfReloadStale(drive, messenger);
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(
@@ -83,6 +88,25 @@ class _DriveView extends StatelessWidget {
         ),
       );
     }
+  }
+
+  /// El fichero puede haberse subido bien aunque la relectura posterior de
+  /// la carpeta haya fallado (ver [DriveController.load]): en ese caso la
+  /// lista se conserva tal y como estaba, sin el fichero nuevo todavía, así
+  /// que avisamos para que el usuario sepa que debe refrescar en vez de
+  /// pensar que la subida falló en silencio.
+  void _warnIfReloadStale(
+    DriveController drive,
+    ScaffoldMessengerState messenger,
+  ) {
+    if (drive.error == null) return;
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Guardado, pero la lista no se ha podido refrescar todavía. Desliza hacia abajo para actualizarla.',
+        ),
+      ),
+    );
   }
 
   /// Abre la cámara, comprime la foto y la sube directamente a la carpeta
@@ -123,6 +147,7 @@ class _DriveView extends StatelessWidget {
 
     try {
       await drive.uploadFile(fileName, bytes, commitMessage: commitMessage);
+      _warnIfReloadStale(drive, messenger);
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(
@@ -439,10 +464,7 @@ class _UploadingOverlayState extends State<_UploadingOverlay>
           child: Card(
             elevation: 6,
             child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 32,
-                vertical: 24,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -761,9 +783,7 @@ class _ManageReposDialog extends StatelessWidget {
                   ),
                   FilledButton(
                     onPressed:
-                        matches
-                            ? () => Navigator.of(context).pop(true)
-                            : null,
+                        matches ? () => Navigator.of(context).pop(true) : null,
                     style: FilledButton.styleFrom(
                       backgroundColor: Theme.of(context).colorScheme.error,
                       foregroundColor: Theme.of(context).colorScheme.onError,
@@ -1148,7 +1168,11 @@ class _DriveBody extends StatelessWidget {
       return const Center(child: CircularProgressIndicator());
     }
 
-    if (drive.error != null) {
+    // Solo tapamos la pantalla con el error de pantalla completa si además
+    // no hay ninguna entrada que mostrar. Si la carga anterior sí trajo
+    // contenido válido, un fallo puntual al recargar (p. ej. justo tras
+    // subir un fichero) no debe hacerlo desaparecer de la vista.
+    if (drive.error != null && drive.entries.isEmpty) {
       return ListView(
         children: [
           const SizedBox(height: 120),

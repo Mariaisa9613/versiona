@@ -174,6 +174,7 @@ class DriveService {
   static const _transientRetryDelays = [
     Duration(milliseconds: 400),
     Duration(milliseconds: 900),
+    Duration(milliseconds: 1500),
   ];
 
   Future<T> _withRetryOnTransientNotFound<T>(
