@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Proxy OAuth (Versiona)",
+            "type": "shell",
+            "command": "${workspaceFolder}/tool/start_oauth_proxy.sh",
+            "isBackground": true,
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "close": false
+            },
+            "problemMatcher": {
+                "pattern": {
+                    "regexp": "^(?:nunca-hace-match)$",
+                    "file": 1,
+                    "location": 2,
+                    "message": 3
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^Arrancando",
+                    "endsPattern": "escuchando en"
+                }
+            }
+        }
+    ]
+}

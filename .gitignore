@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Secreto local del proxy OAuth (tool/dev_web.sh) - nunca subir a git.
+/tool/oauth_secret.local
