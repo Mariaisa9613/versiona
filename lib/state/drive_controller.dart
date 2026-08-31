@@ -213,4 +213,11 @@ class DriveController extends ChangeNotifier {
     await _service.approveAndConsolidate(summary: summary);
     await load();
   }
+
+  /// Descarta los cambios pendientes de [entry] únicamente (a diferencia de
+  /// [approveAndConsolidate], no toca el resto de la rama de revisión).
+  Future<void> rejectChanges(DriveEntry entry) async {
+    await _service.rejectChanges(path: entry.path, fileName: entry.name);
+    await load();
+  }
 }

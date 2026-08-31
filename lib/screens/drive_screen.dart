@@ -1226,7 +1226,13 @@ class _DriveBody extends StatelessWidget {
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              ReviewStatusBadge(status: entry.status),
+              entry.isFolder
+                  ? ReviewStatusBadge(status: entry.status)
+                  : InkWell(
+                    borderRadius: BorderRadius.circular(20),
+                    onTap: () => onOpenHistory(entry),
+                    child: ReviewStatusBadge(status: entry.status),
+                  ),
               const SizedBox(width: 4),
               PopupMenuButton<String>(
                 onSelected: (value) {

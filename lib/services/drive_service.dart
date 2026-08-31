@@ -576,6 +576,61 @@ class DriveService {
     }
   }
 
+  /// Descarta los cambios pendientes de [path] en la rama de revisión: lo
+  /// deja tal y como está en la rama validada, o lo borra directamente de
+  /// la rama de revisión si nunca llegó a aprobarse (fichero nuevo).
+  ///
+  /// A diferencia de [approveAndConsolidate], esto afecta solo a este
+  /// fichero, no a toda la rama de revisión.
+  Future<void> rejectChanges({
+    required String path,
+    required String fileName,
+  }) async {
+    final pending = await _github.repositories.getContents(
+      slug,
+      path,
+      ref: _workingBranch,
+    );
+    final pendingSha = pending.file?.sha;
+    if (pendingSha == null) {
+      throw StateError('No se pudo leer el fichero pendiente de revisión.');
+    }
+
+    GitHubFile? validatedFile;
+    try {
+      final validated = await _github.repositories.getContents(
+        slug,
+        path,
+        ref: _validatedBranch,
+      );
+      validatedFile = validated.file;
+    } on GitHubError {
+      // Igual que en _validatedShasFor: no existe (todavía) en la rama
+      // validada, así que rechazar equivale a borrarlo de la de revisión.
+      validatedFile = null;
+    }
+
+    if (validatedFile?.content == null) {
+      await _github.repositories.deleteFile(
+        slug,
+        path,
+        'Rechazar cambios en $fileName',
+        pendingSha,
+        _workingBranch,
+      );
+      return;
+    }
+
+    await _github.repositories.updateFile(
+      slug,
+      path,
+      'Rechazar cambios en $fileName',
+      validatedFile!.content!.replaceAll('\n', ''),
+      pendingSha,
+      branch: _workingBranch,
+    );
+  }
+
   /// Aprueba todos los cambios pendientes: fusiona la rama de revisión
   /// sobre la rama validada con un commit de fusión real (no se reescribe
   /// ni se pierde historial).

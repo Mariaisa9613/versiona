@@ -139,6 +139,58 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
     }
   }
 
+  Future<void> _rejectChanges() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Rechazar cambios'),
+            content: Text(
+              'Se descartará la versión pendiente de "${widget.entry.name}": '
+              'volverá a como estaba en la última aprobación, o se eliminará '
+              'si nunca llegó a aprobarse. Esto no afecta a otros ficheros en '
+              'revisión, y no se puede deshacer.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.red.shade700,
+                ),
+                child: const Text('Rechazar'),
+              ),
+            ],
+          ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final drive = context.read<DriveController>();
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+
+    try {
+      await drive.rejectChanges(widget.entry);
+      if (!mounted) return;
+      navigator.pop();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Cambios rechazados')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            describeError(e, fallback: 'No se pudo rechazar el cambio.'),
+          ),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final drive = context.read<DriveController>();
@@ -164,14 +216,30 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
               ? SafeArea(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
-                  child: FilledButton.icon(
-                    onPressed: _approveAndConsolidate,
-                    icon: const Icon(Icons.task_alt),
-                    label: const Text('Aprobar y consolidar'),
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(48),
-                      backgroundColor: const Color(0xFF1B7A3D),
-                    ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: _approveAndConsolidate,
+                        icon: const Icon(Icons.task_alt),
+                        label: const Text('Aprobar y consolidar'),
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size.fromHeight(48),
+                          backgroundColor: const Color(0xFF1B7A3D),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: _rejectChanges,
+                        icon: const Icon(Icons.cancel_outlined),
+                        label: const Text('Rechazar'),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(48),
+                          foregroundColor: Colors.red.shade700,
+                          side: BorderSide(color: Colors.red.shade700),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               )
