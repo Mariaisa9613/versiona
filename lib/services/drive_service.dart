@@ -456,7 +456,14 @@ class DriveService {
         _validatedBranch,
         _workBranch,
       );
-      final files = comparison.files ?? const <CommitFile>[];
+      // Fuera el fichero interno que mantiene vivas las carpetas vacías: no
+      // es un cambio que nadie tenga que revisar (ni siquiera se ve), pero
+      // contaba como pendiente y llegaba a bloquear el borrado de una carpeta
+      // recién creada, sin forma de desbloquearlo.
+      final files =
+          (comparison.files ?? const <CommitFile>[])
+              .where((f) => !_isFolderKeepFile(f.name))
+              .toList();
       _comparedCache = files;
       return files;
     } on GitHubError catch (e) {
@@ -464,6 +471,11 @@ class DriveService {
       return const [];
     }
   }
+
+  bool _isFolderKeepFile(String? path) =>
+      path != null &&
+      (path == GitHubConfig.folderKeepFile ||
+          path.endsWith('/${GitHubConfig.folderKeepFile}'));
 
   /// Rutas que la comparación da por eliminadas en la rama de trabajo.
   Future<Set<String>> _removedPaths({bool forceRefresh = false}) async {
