@@ -33,6 +33,15 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
+  <!--
+    OCR de tickets/facturas en web (ver lib/services/ticket_ocr_web.dart).
+    Este script es el propio de Versiona (no una CDN de terceros); la
+    imagen del ticket se procesa entera en el navegador vía WebAssembly y
+    nunca sale de él. Este fichero solo carga el punto de entrada: el motor
+    WASM y los datos de idioma (varios MB) se piden a la CDN oficial de
+    Tesseract.js la primera vez que se usa, no en cada carga de la página.
+  -->
+  <script src="tesseract/tesseract.min.js"></script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

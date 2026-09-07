@@ -3,6 +3,7 @@ import 'package:github/github.dart';
 
 import '../models/drive_entry.dart';
 import '../models/file_version.dart';
+import '../models/pending_change.dart';
 import '../services/drive_service.dart';
 import '../utils/error_messages.dart';
 
@@ -20,10 +21,6 @@ class DriveController extends ChangeNotifier {
   String? error;
   DriveViewMode viewMode = DriveViewMode.list;
 
-  /// Si hay una subida de fichero en curso ahora mismo, para poder mostrar
-  /// un indicador de espera (p. ej. al fotografiar un ticket con conexión
-  /// lenta).
-  bool uploading = false;
 
   String? get activeRepoName => _service.repoName;
 
@@ -146,48 +143,113 @@ class DriveController extends ChangeNotifier {
     await load();
   }
 
+  /// Sube [bytes] con el nombre y mensaje de commit que devuelva [prepare].
+  ///
+  /// La entrada aparece en la lista **al momento**, con [placeholderName] y
+  /// su indicador de carga, y el reconocimiento de texto y la subida ocurren
+  /// por detrás. Así fotografiar un ticket se siente inmediato aunque el OCR
+  /// tarde unos segundos, y mientras tanto se puede seguir usando la app.
+  /// Al terminar, la entrada provisional se sustituye por la real (que puede
+  /// llamarse distinto, si el OCR ha reconocido un número de factura).
   Future<void> uploadFile(
-    String fileName,
-    List<int> bytes, {
-    String? commitMessage,
+    List<int> bytes,
+    Future<(String fileName, String? commitMessage)> Function() prepare, {
+    required String placeholderName,
   }) async {
-    uploading = true;
+    final folder = currentPath;
+    final placeholder = DriveEntry(
+      name: placeholderName,
+      path: folder.isEmpty ? placeholderName : '$folder/$placeholderName',
+      type: DriveEntryType.file,
+      uploading: true,
+    );
+    _upsertEntry(placeholder);
     notifyListeners();
+
     try {
-      await _service.uploadFile(
-        folderPath: currentPath,
+      final (fileName, commitMessage) = await prepare();
+      final uploaded = await _service.uploadFile(
+        folderPath: folder,
         fileName: fileName,
         bytes: bytes,
         commitMessage: commitMessage,
       );
-      await load();
+      // Puede haberse cambiado de carpeta mientras tanto: en ese caso lo
+      // subido no pinta nada en lo que se está viendo ahora.
+      if (folder != currentPath) return;
+      _removeEntry(placeholder.path);
+      _upsertEntry(uploaded);
+    } catch (_) {
+      if (folder == currentPath) _removeEntry(placeholder.path);
+      rethrow;
     } finally {
-      uploading = false;
       notifyListeners();
     }
   }
 
+  /// Crea la carpeta y la añade a la lista al momento, por el mismo motivo
+  /// que [uploadFile].
   Future<void> createFolder(String name) async {
-    await _service.createFolder(folderPath: currentPath, name: name);
-    await load();
+    final folder = await _service.createFolder(
+      folderPath: currentPath,
+      name: name,
+    );
+    _upsertEntry(folder);
+    notifyListeners();
   }
 
+  /// Inserta o reemplaza (por ruta) una entrada en la lista actual,
+  /// manteniendo el mismo orden que usa [DriveService.listFolder]:
+  /// carpetas primero, y alfabético dentro de cada grupo.
+  void _upsertEntry(DriveEntry entry) {
+    entries = [
+      ...entries.where((e) => e.path != entry.path),
+      entry,
+    ]..sort((a, b) {
+      if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+  }
+
+  /// Borra [entry] y refleja al momento **cómo queda**, que es lo que dice el
+  /// servicio: normalmente sigue en la lista marcada como pendiente de
+  /// eliminarse (hasta que se apruebe la baja, la versión aprobada la sigue
+  /// teniendo), y solo desaparece del todo si era algo que nunca llegó a
+  /// aprobarse.
+  ///
+  /// La clave es que esto coincida exactamente con lo que se vería al
+  /// recargar: si no, la entrada desaparece y vuelve a aparecer sola, que es
+  /// justo lo que desconcierta.
   Future<void> deleteEntry(DriveEntry entry) async {
-    await _service.deleteEntry(entry);
-    await load();
+    final result = await _service.deleteEntry(entry);
+    if (result == null) {
+      entries = entries.where((e) => e.path != entry.path).toList();
+    } else {
+      _upsertEntry(result);
+    }
+    notifyListeners();
   }
 
+  /// Renombra [entry] y refleja al momento cómo queda, por el mismo motivo
+  /// que [deleteEntry].
   Future<void> rename(DriveEntry entry, String newName) async {
-    await _service.rename(entry: entry, newName: newName);
-    await load();
+    final renamed = await _service.rename(entry: entry, newName: newName);
+    entries = entries.where((e) => e.path != entry.path).toList();
+    _upsertEntry(renamed);
+    notifyListeners();
   }
 
+  /// Mueve [entry] y, si ha salido de la carpeta actual (el caso normal:
+  /// nadie mueve un fichero a la carpeta en la que ya está), lo quita de la
+  /// lista al momento; si se queda en la misma carpeta, lo actualiza.
   Future<void> move(DriveEntry entry, String destinationFolderPath) async {
-    await _service.move(
+    final moved = await _service.move(
       entry: entry,
       destinationFolderPath: destinationFolderPath,
     );
-    await load();
+    entries = entries.where((e) => e.path != entry.path).toList();
+    if (destinationFolderPath == currentPath) _upsertEntry(moved);
+    notifyListeners();
   }
 
   String webUrlFor(DriveEntry entry) => _service.webUrlFor(entry.path);
@@ -207,17 +269,110 @@ class DriveController extends ChangeNotifier {
     await load();
   }
 
-  /// Aprueba TODOS los cambios pendientes en revisión (no solo un fichero
-  /// concreto) y los consolida como la versión oficial.
-  Future<void> approveAndConsolidate({String? summary}) async {
-    await _service.approveAndConsolidate(summary: summary);
+  /// Cuántas ramas sueltas dejó la versión que guardaba un cambio por rama,
+  /// o 0 si no hay nada que recuperar. Se comprueba una sola vez por sesión:
+  /// es una situación transitoria que deja de darse al resolverla.
+  int leftoverBranches = 0;
+  bool _leftoverChecked = false;
+
+  Future<void> checkLeftoverBranches() async {
+    if (_leftoverChecked) return;
+    _leftoverChecked = true;
+    try {
+      leftoverBranches = (await _service.leftoverChangeBranches()).length;
+    } catch (_) {
+      leftoverBranches = 0;
+    }
+    notifyListeners();
+  }
+
+  /// Trae a la rama de trabajo lo que quedara en esas ramas sueltas y las
+  /// borra, para dejar el espacio funcionando solo con las dos ramas.
+  Future<void> recoverLeftoverBranches() async {
+    await _service.recoverLeftoverChangeBranches();
+    leftoverBranches = 0;
     await load();
   }
 
-  /// Descarta los cambios pendientes de [entry] únicamente (a diferencia de
-  /// [approveAndConsolidate], no toca el resto de la rama de revisión).
-  Future<void> rejectChanges(DriveEntry entry) async {
-    await _service.rejectChanges(path: entry.path, fileName: entry.name);
-    await load();
+  /// Oculta el aviso sin hacer nada: volverá a aparecer en la próxima sesión
+  /// mientras queden ramas sueltas.
+  void dismissLeftoverNotice() {
+    leftoverBranches = 0;
+    notifyListeners();
+  }
+
+  /// Aprueba [changes] (uno o varios): cada fichero pasa a la versión
+  /// aprobada tal y como está. Devuelve el resultado de cada uno, para poder
+  /// avisar si alguno no ha podido aprobarse.
+  ///
+  /// No se recarga la carpeta: ya sabemos cómo queda cada fichero, y esperar
+  /// a que GitHub sirva el contenido nuevo añadía segundos de espera por cada
+  /// cambio. Lo que se pinta aquí es exactamente lo que se vería al recargar.
+  Future<List<ChangeResult>> approveChanges(
+    List<PendingChange> changes, {
+    String? summary,
+  }) async {
+    final results = await _service.approveChanges(changes, summary: summary);
+    // Aprobar una baja la hace efectiva: el fichero ya no está en ningún
+    // sitio. Aprobar cualquier otro cambio lo deja validado, donde está.
+    _applyResolved(
+      changes,
+      results,
+      disappears: (change) => change.kind == PendingChangeKind.deleted,
+    );
+    return results;
+  }
+
+  /// Descarta [changes] (uno o varios): la versión aprobada se queda
+  /// exactamente como estaba.
+  Future<List<ChangeResult>> rejectChanges(List<PendingChange> changes) async {
+    final results = await _service.rejectChanges(changes);
+    // Rechazar algo que nunca se aprobó lo hace desaparecer; en el resto de
+    // casos el fichero vuelve a como estaba en la versión aprobada.
+    _applyResolved(
+      changes,
+      results,
+      disappears: (change) => change.kind == PendingChangeKind.added,
+    );
+    return results;
+  }
+
+  /// Refleja en la lista los cambios que se han resuelto.
+  ///
+  /// Se recorre lo que se pidió resolver, no los resultados: al aprobar o
+  /// rechazar una carpeta, el servicio la sustituye por los ficheros que
+  /// tiene dentro, y lo que hay en la lista es la carpeta. Si alguno de esos
+  /// ficheros ha fallado, la carpeta se deja como estaba.
+  void _applyResolved(
+    List<PendingChange> requested,
+    List<ChangeResult> results, {
+    required bool Function(PendingChange change) disappears,
+  }) {
+    final failed = results.where((r) => !r.ok).map((r) => r.change.path);
+
+    for (final change in requested) {
+      final somethingFailed = failed.any(
+        (path) => path == change.path || path.startsWith('${change.path}/'),
+      );
+      if (somethingFailed) continue;
+
+      if (disappears(change)) {
+        _removeEntry(change.path);
+      } else {
+        _markValidated(change.path);
+      }
+    }
+    notifyListeners();
+  }
+
+  void _removeEntry(String path) {
+    entries = entries.where((e) => e.path != path).toList();
+  }
+
+  void _markValidated(String path) {
+    entries = [
+      for (final entry in entries)
+        if (entry.path == path) entry.asValidated() else entry,
+    ];
   }
 }

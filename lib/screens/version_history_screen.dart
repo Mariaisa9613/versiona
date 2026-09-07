@@ -76,21 +76,26 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
     }
   }
 
-  Future<void> _approveAndConsolidate() async {
+  /// Aprueba el cambio pendiente de **este** fichero, sin tocar el resto de
+  /// cambios que haya en el espacio: cada uno vive en su propia rama.
+  Future<void> _approveChange() async {
+    final change = widget.entry.pendingChange;
+    if (change == null) return;
+
     final summaryController = TextEditingController();
     final confirmed = await showDialog<bool>(
       context: context,
       builder:
           (context) => AlertDialog(
-            title: const Text('Aprobar y consolidar'),
+            title: const Text('Aprobar cambios'),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Esto aprobará TODOS los cambios pendientes en revisión '
-                  '(no solo este fichero) y los consolidará como la versión '
-                  'oficial.',
+                Text(
+                  'Se aprobarán los cambios de "${widget.entry.name}" y '
+                  'pasarán a ser la versión oficial. El resto de cambios '
+                  'pendientes se quedan como están.',
                 ),
                 const SizedBox(height: 16),
                 TextField(
@@ -109,7 +114,7 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
               ),
               FilledButton(
                 onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('Aprobar y consolidar'),
+                child: const Text('Aprobar'),
               ),
             ],
           ),
@@ -122,11 +127,23 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
     final navigator = Navigator.of(context);
 
     try {
-      await drive.approveAndConsolidate(summary: summaryController.text);
+      final results = await drive.approveChanges(
+        [change],
+        summary: summaryController.text,
+      );
       if (!mounted) return;
+      // Al aprobar una carpeta viene un resultado por cada fichero de
+      // dentro, así que lo que interesa es si alguno ha fallado.
+      final failure = results.where((r) => !r.ok).firstOrNull;
       navigator.pop();
       messenger.showSnackBar(
-        const SnackBar(content: Text('Cambios aprobados y consolidados')),
+        SnackBar(
+          content: Text(
+            failure == null
+                ? 'Cambios aprobados'
+                : 'No se pudo aprobar: ${failure.error}',
+          ),
+        ),
       );
     } catch (e) {
       messenger.showSnackBar(
@@ -140,16 +157,20 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
   }
 
   Future<void> _rejectChanges() async {
+    final change = widget.entry.pendingChange;
+    if (change == null) return;
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder:
           (context) => AlertDialog(
             title: const Text('Rechazar cambios'),
             content: Text(
-              'Se descartará la versión pendiente de "${widget.entry.name}": '
-              'volverá a como estaba en la última aprobación, o se eliminará '
-              'si nunca llegó a aprobarse. Esto no afecta a otros ficheros en '
-              'revisión, y no se puede deshacer.',
+              'Se descartarán TODOS los cambios pendientes de '
+              '"${widget.entry.name}" desde la última aprobación: volverá a '
+              'como estaba entonces, o desaparecerá si nunca llegó a '
+              'aprobarse. Esto no afecta a otros ficheros, y no se puede '
+              'deshacer.',
             ),
             actions: [
               TextButton(
@@ -174,11 +195,18 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
     final navigator = Navigator.of(context);
 
     try {
-      await drive.rejectChanges(widget.entry);
+      final results = await drive.rejectChanges([change]);
       if (!mounted) return;
+      final failure = results.where((r) => !r.ok).firstOrNull;
       navigator.pop();
       messenger.showSnackBar(
-        const SnackBar(content: Text('Cambios rechazados')),
+        SnackBar(
+          content: Text(
+            failure == null
+                ? 'Cambios rechazados'
+                : 'No se pudo rechazar: ${failure.error}',
+          ),
+        ),
       );
     } catch (e) {
       messenger.showSnackBar(
@@ -220,9 +248,9 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       FilledButton.icon(
-                        onPressed: _approveAndConsolidate,
+                        onPressed: _approveChange,
                         icon: const Icon(Icons.task_alt),
-                        label: const Text('Aprobar y consolidar'),
+                        label: const Text('Aprobar estos cambios'),
                         style: FilledButton.styleFrom(
                           minimumSize: const Size.fromHeight(48),
                           backgroundColor: const Color(0xFF1B7A3D),
@@ -250,7 +278,7 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
             child: Align(
               alignment: Alignment.centerLeft,
-              child: ReviewStatusBadge(status: widget.entry.status),
+              child: ReviewStatusBadge(pendingChange: widget.entry.pendingChange),
             ),
           ),
           Expanded(child: _buildVersionList()),

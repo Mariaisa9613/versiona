@@ -18,9 +18,11 @@ import '../widgets/review_status_badge.dart';
 import 'folder_picker_screen.dart';
 import 'version_history_screen.dart';
 
-/// Prefijo de nombre que marca un fichero como ticket fotografiado desde la
-/// cámara, para poder distinguirlo visualmente en el tablero Kanban.
-const _ticketFilePrefix = 'TICKET_';
+/// Prefijos de nombre que marcan un fichero como ticket/factura, para poder
+/// distinguirlo visualmente en el tablero Kanban: "TICKET_" es el nombre por
+/// defecto de una foto de ticket, "FACTURA_" el que se le da cuando el OCR
+/// reconoce un número de factura (al fotografiar o al subir una imagen).
+const _ticketFilePrefixes = ['TICKET_', 'FACTURA_'];
 
 class DriveScreen extends StatelessWidget {
   const DriveScreen({super.key});
@@ -32,7 +34,8 @@ class DriveScreen extends StatelessWidget {
           (context) =>
               DriveController(context.read<AuthController>().driveService!)
                 ..load()
-                ..loadAvailableRepos(),
+                ..loadAvailableRepos()
+                ..checkLeftoverBranches(),
       child: const _DriveView(),
     );
   }
@@ -74,11 +77,33 @@ class _DriveView extends StatelessWidget {
     if (result == null) return;
 
     final (file, message) = result;
-    if (file.bytes == null) return;
+    final bytes = file.bytes;
+    if (bytes == null) return;
 
     try {
-      await drive.uploadFile(file.name, file.bytes!, commitMessage: message);
-      _warnIfReloadStale(drive, messenger);
+      await drive.uploadFile(bytes, placeholderName: file.name, () async {
+        final mimeType = _imageMimeTypeFor(file.name);
+        if (mimeType == null) return (file.name, message);
+
+        final ocrService = TicketOcrService();
+        final ocrResult = await ocrService.analyze(bytes, mimeType: mimeType);
+        if (ocrResult == null) return (file.name, message);
+
+        // El texto reconocido se añade siempre que haya alguno. Reconocer
+        // además el número de factura solo sirve para renombrar el fichero:
+        // son dos cosas independientes, y antes no añadir lo uno impedía
+        // también lo otro.
+        final fileName = ocrService.applyInvoiceNumberToName(
+          file.name,
+          ocrResult.invoiceNumber,
+        );
+        final extracted = _truncateOcrText(ocrResult.rawText);
+        final commitMessage =
+            message.trim().isEmpty
+                ? extracted
+                : '${message.trim()}\n\n$extracted';
+        return (fileName, commitMessage);
+      });
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(
@@ -90,23 +115,27 @@ class _DriveView extends StatelessWidget {
     }
   }
 
-  /// El fichero puede haberse subido bien aunque la relectura posterior de
-  /// la carpeta haya fallado (ver [DriveController.load]): en ese caso la
-  /// lista se conserva tal y como estaba, sin el fichero nuevo todavía, así
-  /// que avisamos para que el usuario sepa que debe refrescar en vez de
-  /// pensar que la subida falló en silencio.
-  void _warnIfReloadStale(
-    DriveController drive,
-    ScaffoldMessengerState messenger,
-  ) {
-    if (drive.error == null) return;
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Guardado, pero la lista no se ha podido refrescar todavía. Desliza hacia abajo para actualizarla.',
-        ),
-      ),
-    );
+  /// Tipo MIME si [fileName] es una imagen sobre la que merece la pena
+  /// intentar OCR, o `null` si es otro tipo de fichero (PDF, hoja de
+  /// cálculo...) que no tiene sentido pasar por reconocimiento de texto.
+  String? _imageMimeTypeFor(String fileName) {
+    final lower = fileName.toLowerCase();
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) {
+      return 'image/jpeg';
+    }
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    return null;
+  }
+
+  /// Longitud máxima del texto reconocido que se añade al mensaje de
+  /// commit, para no generar commits con cuerpos kilométricos.
+  static const _maxOcrTextLength = 400;
+
+  String _truncateOcrText(String text) {
+    return text.length > _maxOcrTextLength
+        ? '${text.substring(0, _maxOcrTextLength)}…'
+        : text;
   }
 
   /// Abre la cámara, comprime la foto y la sube directamente a la carpeta
@@ -114,8 +143,10 @@ class _DriveView extends StatelessWidget {
   /// enseguida en la columna "Pendiente de validación" del tablero.
   ///
   /// Antes de subir, intenta reconocer el texto del ticket on-device (ML
-  /// Kit, sin conexión) para incluirlo en el mensaje de commit. En web, o si
-  /// el reconocimiento falla, se sube igualmente con el mensaje por defecto.
+  /// Kit en Android/iOS, Tesseract.js en web) para renombrar el fichero con
+  /// el número de factura si lo reconoce, y ampliar el mensaje de commit con
+  /// el texto extraído. Si no reconoce nada, o el reconocimiento falla, se
+  /// sube igualmente con el nombre y mensaje por defecto.
   Future<void> _captureTicket(BuildContext context) async {
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
@@ -137,17 +168,26 @@ class _DriveView extends StatelessWidget {
     if (photo == null) return; // El usuario canceló la foto.
 
     final bytes = await photo.readAsBytes();
-    final fileName = ticketService.nombreTicket();
-    final extractedText = await TicketOcrService().extractText(photo.path);
-
-    final commitMessage =
-        extractedText == null
-            ? 'Ticket fotografiado desde el móvil'
-            : 'Ticket fotografiado desde el móvil\n\n$extractedText';
+    final defaultName = ticketService.nombreTicket();
 
     try {
-      await drive.uploadFile(fileName, bytes, commitMessage: commitMessage);
-      _warnIfReloadStale(drive, messenger);
+      await drive.uploadFile(bytes, placeholderName: defaultName, () async {
+        const motivo = 'Ticket fotografiado desde el móvil';
+        final ocrService = TicketOcrService();
+        final ocrResult = await ocrService.analyze(
+          bytes,
+          mimeType: 'image/jpeg',
+        );
+        if (ocrResult == null) return (defaultName, motivo);
+
+        // Igual que al subir una imagen: el texto reconocido va al mensaje
+        // aunque no se haya identificado ningún número de factura.
+        final fileName = ocrService.applyInvoiceNumberToName(
+          defaultName,
+          ocrResult.invoiceNumber,
+        );
+        return (fileName, '$motivo\n\n${_truncateOcrText(ocrResult.rawText)}');
+      });
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(
@@ -271,6 +311,30 @@ class _DriveView extends StatelessWidget {
     }
   }
 
+  /// Mueve [entry] dentro de [folder] al soltarlo encima, sin pasar por el
+  /// selector de carpeta: el destino ya lo ha elegido el gesto.
+  Future<void> _moveEntryInto(
+    BuildContext context,
+    DriveEntry entry,
+    DriveEntry folder,
+  ) async {
+    final drive = context.read<DriveController>();
+    final messenger = ScaffoldMessenger.of(context);
+
+    try {
+      await drive.move(entry, folder.path);
+      messenger.showSnackBar(
+        SnackBar(content: Text('"${entry.name}" movido a "${folder.name}"')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(describeError(e, fallback: 'No se pudo mover.')),
+        ),
+      );
+    }
+  }
+
   Future<void> _confirmDelete(BuildContext context, DriveEntry entry) async {
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
@@ -365,6 +429,8 @@ class _DriveView extends StatelessWidget {
         children: [
           Column(
             children: [
+              if (drive.leftoverBranches > 0)
+                _LeftoverBranchesNotice(drive: drive),
               Row(
                 children: [
                   Expanded(child: _Breadcrumbs(drive: drive)),
@@ -392,12 +458,14 @@ class _DriveView extends StatelessWidget {
                     onRename: (entry) => _renameEntry(context, entry),
                     onMove: (entry) => _moveEntry(context, entry),
                     onDelete: (entry) => _confirmDelete(context, entry),
+                    onMoveInto:
+                        (entry, folder) =>
+                            _moveEntryInto(context, entry, folder),
                   ),
                 ),
               ),
             ],
           ),
-          if (drive.uploading) const _UploadingOverlay(),
         ],
       ),
       floatingActionButton: Row(
@@ -412,7 +480,7 @@ class _DriveView extends StatelessWidget {
           const SizedBox(width: 12),
           FloatingActionButton.extended(
             heroTag: 'ticket',
-            onPressed: drive.uploading ? null : () => _captureTicket(context),
+            onPressed: () => _captureTicket(context),
             icon: const Icon(Icons.camera_alt_outlined),
             label: const Text('Ticket'),
             backgroundColor: Colors.deepPurple,
@@ -421,68 +489,11 @@ class _DriveView extends StatelessWidget {
           const SizedBox(width: 12),
           FloatingActionButton.extended(
             heroTag: 'upload',
-            onPressed: drive.uploading ? null : () => _uploadFile(context),
+            onPressed: () => _uploadFile(context),
             icon: const Icon(Icons.upload_file_outlined),
             label: const Text('Subir'),
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// Overlay a pantalla completa con un reloj de arena girando, para que la
-/// espera durante una subida (ticket fotografiado o fichero) no parezca que
-/// la app se ha quedado colgada. Bloquea la interacción con el resto de la
-/// pantalla mientras dura.
-class _UploadingOverlay extends StatefulWidget {
-  const _UploadingOverlay();
-
-  @override
-  State<_UploadingOverlay> createState() => _UploadingOverlayState();
-}
-
-class _UploadingOverlayState extends State<_UploadingOverlay>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1200),
-  )..repeat();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned.fill(
-      child: ColoredBox(
-        color: Colors.black.withValues(alpha: 0.35),
-        child: Center(
-          child: Card(
-            elevation: 6,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  RotationTransition(
-                    turns: _controller,
-                    child: const Icon(
-                      Icons.hourglass_bottom,
-                      size: 40,
-                      color: Colors.deepPurple,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text('Subiendo...'),
-                ],
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -1152,6 +1163,7 @@ class _DriveBody extends StatelessWidget {
     required this.onRename,
     required this.onMove,
     required this.onDelete,
+    required this.onMoveInto,
   });
 
   final DriveController drive;
@@ -1161,6 +1173,22 @@ class _DriveBody extends StatelessWidget {
   final ValueChanged<DriveEntry> onRename;
   final ValueChanged<DriveEntry> onMove;
   final ValueChanged<DriveEntry> onDelete;
+
+  /// Soltar [DriveEntry] encima de una carpeta para meterlo dentro.
+  final void Function(DriveEntry entry, DriveEntry folder) onMoveInto;
+
+  void _handleAction(DriveEntry entry, String action) {
+    switch (action) {
+      case 'history':
+        onOpenHistory(entry);
+      case 'rename':
+        onRename(entry);
+      case 'move':
+        onMove(entry);
+      case 'delete':
+        onDelete(entry);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1207,6 +1235,7 @@ class _DriveBody extends StatelessWidget {
         drive: drive,
         onOpenFolder: onOpenFolder,
         onOpenFile: onOpenFile,
+        onAction: (entry, action) => _handleAction(entry, action),
       );
     }
 
@@ -1216,64 +1245,233 @@ class _DriveBody extends StatelessWidget {
       separatorBuilder: (_, __) => const Divider(height: 1),
       itemBuilder: (context, index) {
         final entry = drive.entries[index];
-        return ListTile(
-          leading: CircleAvatar(child: Icon(iconForDriveEntry(entry))),
-          title: Text(entry.name),
-          subtitle:
-              entry.isFolder
-                  ? const Text('Carpeta')
-                  : const Text('Toca para previsualizarlo'),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              entry.isFolder
-                  ? ReviewStatusBadge(status: entry.status)
-                  : InkWell(
-                    borderRadius: BorderRadius.circular(20),
-                    onTap: () => onOpenHistory(entry),
-                    child: ReviewStatusBadge(status: entry.status),
-                  ),
-              const SizedBox(width: 4),
-              PopupMenuButton<String>(
-                onSelected: (value) {
-                  switch (value) {
-                    case 'history':
-                      onOpenHistory(entry);
-                    case 'rename':
-                      onRename(entry);
-                    case 'move':
-                      onMove(entry);
-                    case 'delete':
-                      onDelete(entry);
-                  }
-                },
-                itemBuilder:
-                    (context) => [
-                      if (!entry.isFolder)
-                        const PopupMenuItem(
-                          value: 'history',
-                          child: Text('Ver historial'),
-                        ),
-                      const PopupMenuItem(
-                        value: 'rename',
-                        child: Text('Renombrar'),
-                      ),
-                      const PopupMenuItem(
-                        value: 'move',
-                        child: Text('Mover a...'),
-                      ),
-                      const PopupMenuDivider(),
-                      const PopupMenuItem(
-                        value: 'delete',
-                        child: Text('Eliminar'),
-                      ),
-                    ],
-              ),
-            ],
-          ),
-          onTap: () => entry.isFolder ? onOpenFolder(entry) : onOpenFile(entry),
+        return _EntryTile(
+          entry: entry,
+          onOpenFolder: onOpenFolder,
+          onOpenFile: onOpenFile,
+          onOpenHistory: onOpenHistory,
+          onRename: onRename,
+          onMove: onMove,
+          onDelete: onDelete,
+          onMoveInto: onMoveInto,
         );
       },
+    );
+  }
+}
+
+/// Una fila de la lista: se puede arrastrar sobre una carpeta para meterla
+/// dentro, y abrir su menú con el botón derecho o con una pulsación larga.
+class _EntryTile extends StatelessWidget {
+  const _EntryTile({
+    required this.entry,
+    required this.onOpenFolder,
+    required this.onOpenFile,
+    required this.onOpenHistory,
+    required this.onRename,
+    required this.onMove,
+    required this.onDelete,
+    required this.onMoveInto,
+  });
+
+  final DriveEntry entry;
+  final ValueChanged<DriveEntry> onOpenFolder;
+  final ValueChanged<DriveEntry> onOpenFile;
+  final ValueChanged<DriveEntry> onOpenHistory;
+  final ValueChanged<DriveEntry> onRename;
+  final ValueChanged<DriveEntry> onMove;
+  final ValueChanged<DriveEntry> onDelete;
+  final void Function(DriveEntry entry, DriveEntry folder) onMoveInto;
+
+  void _handle(String action) {
+    switch (action) {
+      case 'history':
+        onOpenHistory(entry);
+      case 'rename':
+        onRename(entry);
+      case 'move':
+        onMove(entry);
+      case 'delete':
+        onDelete(entry);
+    }
+  }
+
+  /// No se puede soltar algo sobre sí mismo, ni una carpeta dentro de una de
+  /// sus propias subcarpetas.
+  bool _accepts(DriveEntry dragged) =>
+      entry.isFolder &&
+      dragged.path != entry.path &&
+      !entry.path.startsWith('${dragged.path}/');
+
+  @override
+  Widget build(BuildContext context) {
+    final tile = ListTile(
+      leading:
+          entry.uploading
+              ? const CircleAvatar(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+              : CircleAvatar(child: Icon(iconForDriveEntry(entry))),
+      title: Text(entry.name),
+      subtitle:
+          entry.uploading
+              ? const Text('Guardando…')
+              : entry.isFolder
+              ? const Text('Carpeta')
+              : const Text('Toca para previsualizarlo'),
+      trailing:
+          entry.uploading
+              ? null
+              : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  entry.isFolder
+                      ? ReviewStatusBadge(pendingChange: entry.pendingChange)
+                      : InkWell(
+                        borderRadius: BorderRadius.circular(20),
+                        onTap: () => onOpenHistory(entry),
+                        child: ReviewStatusBadge(
+                          pendingChange: entry.pendingChange,
+                        ),
+                      ),
+                  const SizedBox(width: 4),
+                  PopupMenuButton<String>(
+                    onSelected: _handle,
+                    itemBuilder: (context) => entryMenuItems(entry),
+                  ),
+                ],
+              ),
+      onTap:
+          entry.uploading
+              ? null
+              : () => entry.isFolder ? onOpenFolder(entry) : onOpenFile(entry),
+    );
+
+    // Mientras se guarda todavía no existe en el repositorio: no se puede
+    // arrastrar, ni abrir, ni pedirle acciones.
+    if (entry.uploading) return tile;
+
+    // El arrastre se inicia en horizontal a propósito: así no compite con el
+    // desplazamiento vertical de la lista, y funciona igual con ratón que con
+    // el dedo. La pulsación larga queda libre para el menú.
+    final draggable = Draggable<DriveEntry>(
+      data: entry,
+      affinity: Axis.horizontal,
+      feedback: _DragFeedback(entry: entry),
+      childWhenDragging: Opacity(opacity: 0.4, child: tile),
+      child: tile,
+    );
+
+    final withMenu = _EntryContextMenu(
+      entry: entry,
+      onAction: _handle,
+      child: draggable,
+    );
+
+    if (!entry.isFolder) return withMenu;
+
+    return DragTarget<DriveEntry>(
+      onWillAcceptWithDetails: (details) => _accepts(details.data),
+      onAcceptWithDetails: (details) => onMoveInto(details.data, entry),
+      builder: (context, candidate, rejected) {
+        final highlighted = candidate.isNotEmpty;
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color:
+                highlighted
+                    ? Theme.of(
+                      context,
+                    ).colorScheme.primary.withValues(alpha: 0.12)
+                    : null,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: withMenu,
+        );
+      },
+    );
+  }
+}
+
+/// Acciones disponibles sobre un fichero o carpeta, compartidas por el botón
+/// de "…", el menú contextual y la pulsación larga.
+List<PopupMenuEntry<String>> entryMenuItems(DriveEntry entry) => [
+  if (!entry.isFolder)
+    const PopupMenuItem(value: 'history', child: Text('Ver historial')),
+  const PopupMenuItem(value: 'rename', child: Text('Renombrar')),
+  const PopupMenuItem(value: 'move', child: Text('Mover a...')),
+  const PopupMenuDivider(),
+  const PopupMenuItem(value: 'delete', child: Text('Eliminar')),
+];
+
+/// Abre el menú de acciones con el botón derecho (ratón) o con una pulsación
+/// larga (táctil), justo donde está el puntero o el dedo.
+class _EntryContextMenu extends StatelessWidget {
+  const _EntryContextMenu({
+    required this.entry,
+    required this.onAction,
+    required this.child,
+  });
+
+  final DriveEntry entry;
+  final void Function(String action) onAction;
+  final Widget child;
+
+  Future<void> _show(BuildContext context, Offset position) async {
+    // Todavía se está guardando: no existe en el repositorio, así que no hay
+    // nada que renombrar, mover ni eliminar.
+    if (entry.uploading) return;
+
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        position & Size.zero,
+        Offset.zero & overlay.size,
+      ),
+      items: entryMenuItems(entry),
+    );
+    if (selected != null) onAction(selected);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onSecondaryTapDown: (d) => _show(context, d.globalPosition),
+      onLongPressStart: (d) => _show(context, d.globalPosition),
+      child: child,
+    );
+  }
+}
+
+/// Lo que se ve pegado al puntero mientras se arrastra algo.
+class _DragFeedback extends StatelessWidget {
+  const _DragFeedback({required this.entry});
+
+  final DriveEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      elevation: 6,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(iconForDriveEntry(entry), size: 18),
+            const SizedBox(width: 8),
+            Text(entry.name),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -1289,11 +1487,13 @@ class _KanbanBoard extends StatelessWidget {
     required this.drive,
     required this.onOpenFolder,
     required this.onOpenFile,
+    required this.onAction,
   });
 
   final DriveController drive;
   final ValueChanged<DriveEntry> onOpenFolder;
   final ValueChanged<DriveEntry> onOpenFile;
+  final void Function(DriveEntry entry, String action) onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -1310,7 +1510,10 @@ class _KanbanBoard extends StatelessWidget {
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.all(16),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        // "stretch" da a cada columna la altura completa del tablero, que es
+        // lo que les permite tener su propio scroll vertical: sin esto, una
+        // columna con muchas tarjetas se sale por abajo de la pantalla.
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _KanbanColumn(
             title: 'En preparación',
@@ -1321,6 +1524,7 @@ class _KanbanBoard extends StatelessWidget {
                 'Todavía no hay un paso de borrador separado: cada subida '
                 'entra directamente en "Pendiente de validación".',
             onTap: openEntry,
+            onAction: onAction,
           ),
           const SizedBox(width: 16),
           _KanbanColumn(
@@ -1330,6 +1534,7 @@ class _KanbanBoard extends StatelessWidget {
             entries: inReview,
             emptyHint: 'No hay nada pendiente de aprobar ahora mismo.',
             onTap: openEntry,
+            onAction: onAction,
           ),
           const SizedBox(width: 16),
           _KanbanColumn(
@@ -1339,6 +1544,7 @@ class _KanbanBoard extends StatelessWidget {
             entries: validated,
             emptyHint: 'Todavía no hay nada aprobado en esta carpeta.',
             onTap: openEntry,
+            onAction: onAction,
           ),
         ],
       ),
@@ -1354,6 +1560,7 @@ class _KanbanColumn extends StatelessWidget {
     required this.entries,
     required this.emptyHint,
     required this.onTap,
+    required this.onAction,
   });
 
   final String title;
@@ -1362,6 +1569,7 @@ class _KanbanColumn extends StatelessWidget {
   final List<DriveEntry> entries;
   final String emptyHint;
   final ValueChanged<DriveEntry> onTap;
+  final void Function(DriveEntry entry, String action) onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -1409,10 +1617,21 @@ class _KanbanColumn extends StatelessWidget {
               ),
             )
           else
-            ...entries.map(
-              (entry) => Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: _KanbanCard(entry: entry, onTap: () => onTap(entry)),
+            // Cada columna se desplaza por su cuenta: así una con muchas
+            // tarjetas no empuja a las demás ni se sale de la pantalla.
+            Expanded(
+              child: ListView.builder(
+                padding: EdgeInsets.zero,
+                itemCount: entries.length,
+                itemBuilder:
+                    (context, index) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _KanbanCard(
+                        entry: entries[index],
+                        onTap: () => onTap(entries[index]),
+                        onAction: onAction,
+                      ),
+                    ),
               ),
             ),
         ],
@@ -1421,63 +1640,314 @@ class _KanbanColumn extends StatelessWidget {
   }
 }
 
-class _KanbanCard extends StatelessWidget {
-  const _KanbanCard({required this.entry, required this.onTap});
+/// Aviso, solo mientras queden, de que hay cambios guardados en las ramas
+/// sueltas que creaba una versión anterior de la app. Se resuelve trayéndolos
+/// a la rama de trabajo, que es de donde sale todo lo que se ve.
+class _LeftoverBranchesNotice extends StatefulWidget {
+  const _LeftoverBranchesNotice({required this.drive});
 
-  final DriveEntry entry;
-  final VoidCallback onTap;
+  final DriveController drive;
 
-  bool get _isTicket => entry.name.startsWith(_ticketFilePrefix);
+  @override
+  State<_LeftoverBranchesNotice> createState() =>
+      _LeftoverBranchesNoticeState();
+}
+
+class _LeftoverBranchesNoticeState extends State<_LeftoverBranchesNotice> {
+  bool _working = false;
+
+  Future<void> _approve() async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _working = true);
+    try {
+      await widget.drive.recoverLeftoverBranches();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Cambios sueltos recuperados')),
+      );
+    } catch (e) {
+      if (mounted) setState(() => _working = false);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            describeError(
+              e,
+              fallback: 'No se pudieron recuperar los cambios sueltos.',
+            ),
+          ),
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: EdgeInsets.zero,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    iconForDriveEntry(entry),
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(entry.name, overflow: TextOverflow.ellipsis),
+    final count = widget.drive.leftoverBranches;
+
+    return Material(
+      color: const Color(0xFFFFF1D6),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+        child: Row(
+          children: [
+            const Icon(Icons.history, color: Color(0xFF8A5A00)),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Hay $count ${count == 1 ? "cambio suelto" : "cambios sueltos"} '
+                'de una versión anterior de la app. Recupéralos para que '
+                'vuelvan a verse aquí y puedas aprobarlos o rechazarlos.',
+                style: const TextStyle(color: Color(0xFF8A5A00)),
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (_working)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else ...[
+              TextButton(
+                onPressed: widget.drive.dismissLeftoverNotice,
+                child: const Text('Ahora no'),
+              ),
+              FilledButton(onPressed: _approve, child: const Text('Recuperar')),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _KanbanCard extends StatefulWidget {
+  const _KanbanCard({
+    required this.entry,
+    required this.onTap,
+    required this.onAction,
+  });
+
+  final DriveEntry entry;
+  final VoidCallback onTap;
+  final void Function(DriveEntry entry, String action) onAction;
+
+  @override
+  State<_KanbanCard> createState() => _KanbanCardState();
+}
+
+class _KanbanCardState extends State<_KanbanCard> {
+  bool _working = false;
+
+  DriveEntry get entry => widget.entry;
+  VoidCallback get onTap => widget.onTap;
+
+  bool get _isTicket =>
+      _ticketFilePrefixes.any((prefix) => entry.name.startsWith(prefix));
+
+  /// Aprueba o rechaza el cambio de esta tarjeta sin salir del tablero, que
+  /// es donde se está mirando lo que hay pendiente.
+  Future<void> _resolve({required bool approve}) async {
+    final change = entry.pendingChange;
+    if (change == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: Text(approve ? 'Aprobar cambios' : 'Rechazar cambios'),
+            content: Text(
+              approve
+                  ? 'Los cambios de "${entry.name}" pasarán a ser la versión '
+                      'oficial. El resto se queda como está.'
+                  : 'Se descartarán todos los cambios pendientes de '
+                      '"${entry.name}". Lo ya aprobado no se toca, pero lo '
+                      'pendiente se pierde y no se puede deshacer.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                style:
+                    approve
+                        ? null
+                        : FilledButton.styleFrom(
+                          backgroundColor: Colors.red.shade700,
+                        ),
+                child: Text(approve ? 'Aprobar' : 'Rechazar'),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final drive = context.read<DriveController>();
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _working = true);
+
+    try {
+      final results =
+          approve
+              ? await drive.approveChanges([change])
+              : await drive.rejectChanges([change]);
+      // Al resolver una carpeta viene un resultado por cada fichero de
+      // dentro, así que lo que interesa es si alguno ha fallado.
+      final failure = results.where((r) => !r.ok).firstOrNull;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            failure == null
+                ? (approve ? 'Cambios aprobados' : 'Cambios rechazados')
+                : 'No se pudo: ${failure.error}',
+          ),
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            describeError(
+              e,
+              fallback:
+                  approve
+                      ? 'No se pudo aprobar el cambio.'
+                      : 'No se pudo rechazar el cambio.',
+            ),
+          ),
+        ),
+      );
+    } finally {
+      // La lista se recarga sola tras aprobar/rechazar, así que puede que
+      // esta tarjeta ya no exista cuando terminemos.
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _EntryContextMenu(
+      entry: entry,
+      onAction: (action) => widget.onAction(entry, action),
+      child: Card(
+        margin: EdgeInsets.zero,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    if (entry.uploading)
+                      const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    else
+                      Icon(
+                        iconForDriveEntry(entry),
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(entry.name, overflow: TextOverflow.ellipsis),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    // Qué le pasa a esta entrada: sin esto, una baja pendiente
+                    // se veía igual que cualquier otro cambio.
+                    ReviewStatusBadge(pendingChange: entry.pendingChange),
+                    if (_isTicket)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.deepPurple.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Text(
+                          '[Ticket]',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.deepPurple,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                if (_authorSummary != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _authorSummary!,
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
-              ),
-              if (_isTicket) ...[
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.deepPurple.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Text(
-                    '[Ticket]',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.deepPurple,
+                // Aprobar y rechazar desde la propia tarjeta: el tablero es
+                // justo donde se está mirando lo que hay pendiente, así que
+                // obligar a abrir el fichero para decidir sobraba.
+                if (entry.pendingChange != null && !entry.uploading) ...[
+                  const SizedBox(height: 8),
+                  if (_working)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: LinearProgressIndicator(),
+                    )
+                  else
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () => _resolve(approve: false),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.red.shade700,
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          child: const Text('Rechazar'),
+                        ),
+                        const SizedBox(width: 4),
+                        FilledButton(
+                          onPressed: () => _resolve(approve: true),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF1B7A3D),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          child: const Text('Aprobar'),
+                        ),
+                      ],
                     ),
-                  ),
-                ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
     );
+  }
+
+  /// Quién ha tocado este cambio y cuántas veces, para saber de un vistazo
+  /// de quién es lo que hay pendiente sin tener que abrirlo.
+  String? get _authorSummary {
+    final change = entry.pendingChange;
+    if (change == null || change.authors.isEmpty) return null;
+
+    final quien = change.authors.join(', ');
+    if (change.commitCount <= 1) return quien;
+    return '$quien · ${change.commitCount} modificaciones';
   }
 }

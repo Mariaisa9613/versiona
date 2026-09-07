@@ -74,11 +74,23 @@ class GitHubConfig {
   /// guardar los ficheros del usuario.
   static const String driveRepoName = 'versiona-drive';
 
-  /// Rama donde se escriben todos los cambios (subir, borrar, renombrar,
-  /// mover, restaurar) antes de ser aprobados. La rama por defecto del
-  /// repositorio (normalmente "main") solo se actualiza cuando alguien
-  /// pulsa "Aprobar y consolidar", que fusiona esta rama sobre ella.
-  static const String reviewBranchName = 'en-revision';
+  /// Rama de trabajo: **el Drive tal y como está ahora**.
+  ///
+  /// Todo lo que hace el usuario (subir, crear carpeta, borrar, renombrar,
+  /// mover, restaurar) se escribe aquí, y es de aquí de donde se lista lo que
+  /// se ve en pantalla. La rama por defecto del repositorio guarda la versión
+  /// **aprobada**, y solo cambia cuando alguien aprueba algo.
+  ///
+  /// Aprobar un fichero no fusiona ramas: copia ese fichero concreto de esta
+  /// rama a la aprobada (o lo borra allí, si lo pendiente era una baja). Por
+  /// eso se puede aprobar lo que se quiera, en el orden que sea, sin que
+  /// aparezcan conflictos: en todo el flujo no hay ni una fusión.
+  static const String workBranchName = 'en-revision';
+
+  /// Prefijo de las ramas por cambio que usó brevemente una versión anterior.
+  /// Ya no se crean: solo se conserva para poder detectar y recuperar lo que
+  /// quedara suelto en ellas.
+  static const String legacyChangeBranchPrefix = 'versiona/cambio/';
 
   /// Nombre del fichero "placeholder" usado para poder crear carpetas
   /// vacías (Git no versiona carpetas vacías).

@@ -46,3 +46,7 @@ app.*.map.json
 
 # Secreto local del proxy OAuth (tool/dev_web.sh) - nunca subir a git.
 /tool/oauth_secret.local
+
+# Imágenes de diff que `flutter test` vuelca aquí cuando un golden test
+# falla, para poder inspeccionarlas - no son parte del repo.
+/test/failures/

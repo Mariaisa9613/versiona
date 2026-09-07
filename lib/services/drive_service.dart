@@ -6,18 +6,46 @@ import 'package:github/github.dart';
 import '../config/github_config.dart';
 import '../models/drive_entry.dart';
 import '../models/file_version.dart';
+import '../models/pending_change.dart';
+
+/// Resultado de aprobar o rechazar un cambio, para poder informar de éxitos
+/// parciales cuando se procesan varios de una vez.
+class ChangeResult {
+  const ChangeResult(this.change, {this.error});
+
+  final PendingChange change;
+
+  /// `null` si salió bien; el motivo del fallo si no.
+  final String? error;
+
+  bool get ok => error == null;
+}
 
 /// Convierte el repositorio privado del usuario en un "Drive": expone
 /// operaciones de fichero/carpeta simples por encima de la API de GitHub,
 /// para que el resto de la app nunca tenga que hablar en términos de Git.
 ///
-/// Todos los cambios (subir, crear carpeta, borrar, renombrar, mover,
-/// restaurar) se escriben en la rama de revisión
-/// ([GitHubConfig.reviewBranchName]), nunca directamente en la rama
-/// validada. Un fichero está "Validado" cuando su contenido en la rama de
-/// revisión coincide con el de la rama validada; en caso contrario está
-/// "En revisión" hasta que alguien apruebe los cambios, lo que fusiona la
-/// rama de revisión sobre la validada con un commit de fusión real.
+/// ## Las dos ramas
+///
+/// - La **rama de trabajo** ([GitHubConfig.workBranchName]) es el Drive tal y
+///   como está ahora: ahí se escribe todo y de ahí se lista lo que se ve.
+/// - La **rama por defecto** del repositorio guarda la versión **aprobada**, y
+///   solo cambia cuando alguien aprueba algo.
+///
+/// Un fichero está "Validado" cuando su contenido coincide en las dos; si no,
+/// tiene un cambio pendiente de revisar.
+///
+/// ## Aprobar y rechazar
+///
+/// Aprobar un fichero **no fusiona ramas**: copia ese fichero concreto de la
+/// rama de trabajo a la aprobada, o lo borra allí si lo pendiente era una
+/// baja. Rechazarlo hace lo contrario: devuelve el fichero a como estaba en la
+/// versión aprobada, o lo quita de la rama de trabajo si nunca llegó a
+/// aprobarse.
+///
+/// Como en todo el flujo no hay ni una fusión, no pueden aparecer conflictos,
+/// y se puede aprobar o rechazar cualquier combinación de ficheros en el orden
+/// que sea.
 class DriveService {
   DriveService(this._github);
 
@@ -25,7 +53,17 @@ class DriveService {
   RepositorySlug? _slug;
   String? _defaultBranch;
 
-  static const String _workingBranch = GitHubConfig.reviewBranchName;
+  /// Cambios pendientes del espacio, cacheados para no recalcularlos cada vez
+  /// que se navega. Se invalida solo, desde dentro de este servicio, en cuanto
+  /// algo puede haberlos cambiado.
+  List<PendingChange>? _pendingCache;
+
+  /// La comparación entre las dos ramas, cacheada aparte: el listado de una
+  /// carpeta la necesita, pero no necesita el "quién y cuándo" de cada
+  /// cambio, que cuesta una llamada más por fichero.
+  List<CommitFile>? _comparedCache;
+
+  static const String _workBranch = GitHubConfig.workBranchName;
 
   /// Prefijo con el que Versiona marca la descripción de cada repositorio
   /// que crea, para poder reconocerlos entre el resto de repos del usuario
@@ -55,7 +93,7 @@ class DriveService {
 
   /// Busca el repositorio de datos del usuario y lo crea si es la primera
   /// vez que conecta su cuenta. También garantiza que exista la rama de
-  /// revisión donde se escriben todos los cambios pendientes de aprobar.
+  /// trabajo.
   Future<RepositorySlug> ensureDriveRepo(String ownerLogin) async {
     final candidate = RepositorySlug(ownerLogin, GitHubConfig.driveRepoName);
     Repository repo;
@@ -75,23 +113,25 @@ class DriveService {
         ),
       );
     }
-    _slug = RepositorySlug.full(repo.fullName);
-    _defaultBranch =
-        repo.defaultBranch.isNotEmpty ? repo.defaultBranch : 'main';
-    await _ensureReviewBranch();
+    _adoptRepo(repo);
+    await _ensureWorkBranch();
     return _slug!;
   }
 
   /// Cambia el Drive activo a un repositorio ya existente (elegido por el
-  /// usuario entre los suyos), asegurando que también tenga la rama de
-  /// revisión antes de empezar a usarlo.
+  /// usuario entre los suyos), asegurando que tenga su rama de trabajo.
   Future<void> switchTo(RepositorySlug slug) async {
     if (_slug == slug) return;
     final repo = await _github.repositories.getRepository(slug);
+    _adoptRepo(repo);
+    await _ensureWorkBranch();
+  }
+
+  void _adoptRepo(Repository repo) {
     _slug = RepositorySlug.full(repo.fullName);
     _defaultBranch =
         repo.defaultBranch.isNotEmpty ? repo.defaultBranch : 'main';
-    await _ensureReviewBranch();
+    _invalidatePending();
   }
 
   /// Repositorios (públicos y privados) del usuario entre los que puede
@@ -103,10 +143,7 @@ class DriveService {
   /// anteriormente: por la marca en su descripción, o por el nombre fijo
   /// que usaban las versiones antiguas de la app ([GitHubConfig.driveRepoName])
   /// antes de que se pudiera elegir nombre — para no dejar huérfano el
-  /// espacio de quien ya usaba la app. Se usa al conectar una cuenta para
-  /// saber si hay que reanudar un espacio ya existente o si es la primera
-  /// vez y hace falta crear uno, sin arriesgarse nunca a confundir uno de
-  /// los proyectos propios del usuario con un espacio de Versiona.
+  /// espacio de quien ya usaba la app.
   Future<Repository?> findWorkspace() async {
     final repos = await listAccessibleRepos();
     for (final repo in repos) {
@@ -118,9 +155,9 @@ class DriveService {
     return null;
   }
 
-  /// Crea un nuevo repositorio privado vacío (con su propia rama de
-  /// revisión) y lo deja como Drive activo. Su descripción queda marcada
-  /// para que [findWorkspace] pueda reconocerlo más adelante.
+  /// Crea un nuevo repositorio privado vacío (con su rama de trabajo) y lo
+  /// deja como Drive activo. Su descripción queda marcada para que
+  /// [findWorkspace] pueda reconocerlo más adelante.
   Future<void> createRepo(String name) async {
     final repo = await _github.repositories.createRepository(
       CreateRepository(
@@ -132,10 +169,18 @@ class DriveService {
         hasWiki: false,
       ),
     );
-    _slug = RepositorySlug.full(repo.fullName);
-    _defaultBranch =
-        repo.defaultBranch.isNotEmpty ? repo.defaultBranch : 'main';
-    await _ensureReviewBranch();
+    _adoptRepo(repo);
+    // GitHub responde a "crear repositorio" antes de terminar de prepararlo,
+    // así que durante un instante no existe ninguna rama.
+    await _waitForInitialCommit();
+    await _ensureWorkBranch();
+  }
+
+  Future<void> _waitForInitialCommit() async {
+    for (final delay in _retryDelays) {
+      if (await _branchTipSha(_validatedBranch) != null) return;
+      await Future.delayed(delay);
+    }
   }
 
   /// Elimina un repositorio de GitHub de forma permanente e irreversible
@@ -146,121 +191,326 @@ class DriveService {
     await _github.repositories.deleteRepository(target);
   }
 
-  Future<void> _ensureReviewBranch() async {
+  Future<void> _ensureWorkBranch() async {
+    if (await _branchTipSha(_workBranch) != null) return;
+
+    final baseSha = await _branchTipSha(_validatedBranch);
+    if (baseSha == null) return; // Repositorio sin commits todavía.
+
     try {
-      await _github.git.getReference(slug, 'heads/$_workingBranch');
-    } on NotFound {
-      final base = await _github.git.getReference(
-        slug,
-        'heads/$_validatedBranch',
-      );
       await _github.git.createReference(
         slug,
-        'refs/heads/$_workingBranch',
-        base.object!.sha,
+        'refs/heads/$_workBranch',
+        baseSha,
       );
+    } on GitHubError catch (e) {
+      debugPrint('[Versiona] No se pudo crear "$_workBranch": ${e.message}');
+    }
+  }
+
+  /// Sha de la punta de [branch], o `null` si esa rama no existe.
+  ///
+  /// `repositories.getBranch` no lanza excepción con un 404: devuelve un
+  /// objeto con los campos a nulo (no le pasa a la petición el código que
+  /// espera), así que aquí se mira el contenido, no la excepción.
+  Future<String?> _branchTipSha(String branch) async {
+    try {
+      final result = await _github.repositories.getBranch(slug, branch);
+      return result.commit?.sha;
+    } catch (_) {
+      return null;
     }
   }
 
   String _joinPath(String folderPath, String name) =>
       folderPath.isEmpty ? name : '$folderPath/$name';
 
-  /// Espera entre reintentos al releer justo después de escribir. La API de
-  /// "contents" de GitHub es eventualmente consistente: leerla enseguida
-  /// después de uno o varios commits seguidos (p. ej. al mover una carpeta
-  /// con varios ficheros) puede devolver un 404 aunque el commit ya se haya
-  /// guardado. `getContents()` tampoco conserva el código HTTP real, así que
-  /// llega como [GitHubError] genérico en vez de un [NotFound] tipado.
-  static const _transientRetryDelays = [
+  String _parentPath(String path) {
+    final index = path.lastIndexOf('/');
+    return index == -1 ? '' : path.substring(0, index);
+  }
+
+  /// Espera entre reintentos al releer justo después de escribir: la API de
+  /// "contents" de GitHub es eventualmente consistente y puede devolver un
+  /// error o contenido antiguo durante un instante.
+  static const _retryDelays = [
     Duration(milliseconds: 400),
     Duration(milliseconds: 900),
     Duration(milliseconds: 1500),
   ];
 
-  Future<T> _withRetryOnTransientNotFound<T>(
-    Future<T> Function() action,
-  ) async {
+  Future<T> _withRetry<T>(Future<T> Function() action) async {
     for (var attempt = 0; ; attempt++) {
       try {
         return await action();
       } on GitHubError {
-        if (attempt >= _transientRetryDelays.length) rethrow;
-        await Future.delayed(_transientRetryDelays[attempt]);
+        if (attempt >= _retryDelays.length) rethrow;
+        await Future.delayed(_retryDelays[attempt]);
       }
     }
   }
 
-  /// Lista el contenido (ficheros y carpetas) de [folderPath], con el
-  /// estado de aprobación de cada uno. Usa cadena vacía para la raíz.
-  Future<List<DriveEntry>> listFolder(String folderPath) async {
-    final contents = await _withRetryOnTransientNotFound(
-      () => _github.repositories.getContents(
-        slug,
-        folderPath,
-        ref: _workingBranch,
-      ),
-    );
+  void _invalidatePending() {
+    _pendingCache = null;
+    _comparedCache = null;
+  }
 
-    if (contents.isFile) {
-      return const [];
+  // ---------------------------------------------------------------------
+  // Listado
+  // ---------------------------------------------------------------------
+
+  /// Lista el contenido (ficheros y carpetas) de [folderPath], con el estado
+  /// de aprobación de cada uno. Usa cadena vacía para la raíz.
+  ///
+  /// Lo que se ve es la rama de trabajo, que es el Drive tal y como está
+  /// ahora. Comparándola con la versión aprobada se sabe qué está validado y
+  /// qué tiene cambios sin aprobar, y qué hay pendiente de eliminarse (sigue
+  /// existiendo en la versión aprobada aunque ya no esté aquí).
+  Future<List<DriveEntry>> listFolder(String folderPath) async {
+    // Sin rama de trabajo no se puede saber qué está pendiente: se enseña la
+    // versión aprobada tal cual. Sin esta comprobación, una rama de trabajo
+    // que no existiera haría parecer que TODO el espacio está pendiente de
+    // eliminarse, que es justo la impresión que no se puede dar.
+    if (await _branchTipSha(_workBranch) == null) {
+      await _ensureWorkBranch();
+      if (await _branchTipSha(_workBranch) == null) {
+        return _asEntries(await _treeOf(folderPath, _validatedBranch));
+      }
     }
 
-    final validatedShaByPath = await _validatedShasFor(folderPath);
+    final working = await _treeOf(folderPath, _workBranch, retry: true);
+    final validated = await _treeOf(folderPath, _validatedBranch);
+    // Qué se ha borrado de verdad lo dice la comparación entre las dos ramas,
+    // no la ausencia en el listado: si la lectura de la rama de trabajo viene
+    // vacía o incompleta, deducirlo por ausencia haría parecer que está todo
+    // pendiente de eliminarse.
+    final removedPaths = await _removedPaths();
 
-    final entries =
-        (contents.tree ?? [])
-            .where((f) => f.name != GitHubConfig.folderKeepFile)
-            .map((f) {
-              final isValidated = validatedShaByPath[f.path] == f.sha;
-              return DriveEntry.fromGitHubFile(
-                f,
-                status:
-                    isValidated
-                        ? ReviewStatus.validated
-                        : ReviewStatus.inReview,
-              );
-            })
-            .toList();
+    debugPrint(
+      '[Versiona] "$folderPath": ${working.length} en "$_workBranch", '
+      '${validated.length} en "$_validatedBranch", '
+      '${removedPaths.length} borrados pendientes en el espacio.',
+    );
+
+    final validatedByPath = {
+      for (final f in validated)
+        if (f.path != null) f.path!: f,
+    };
+
+    final entries = <DriveEntry>[];
+    final seen = <String>{};
+
+    for (final file in working) {
+      if (file.name == GitHubConfig.folderKeepFile) continue;
+      final path = file.path;
+      if (path == null) continue;
+      seen.add(path);
+
+      // Solo los ficheros llevan marca de cambio. Una carpeta no cambia por
+      // sí misma: lo que cambia es lo que hay dentro, y ahí es donde se
+      // aprueba o se rechaza.
+      final approved = validatedByPath[path];
+      final isValidated = approved != null && approved.sha == file.sha;
+      entries.add(
+        DriveEntry.fromGitHubFile(
+          file,
+          pendingChange:
+              (isValidated || file.type == 'dir')
+                  ? null
+                  : PendingChange(
+                    path: path,
+                    kind:
+                        approved == null
+                            ? PendingChangeKind.added
+                            : PendingChangeKind.modified,
+                  ),
+        ),
+      );
+    }
+
+    // Lo que está en la versión aprobada pero ya no en la de trabajo está
+    // pendiente de eliminarse: se sigue enseñando, marcado, hasta que se
+    // apruebe la baja. Si desapareciera sin más, borrar parecería definitivo
+    // cuando en realidad todavía hay que aprobarlo.
+    for (final file in validated) {
+      final path = file.path;
+      if (path == null || seen.contains(path)) continue;
+      if (file.name == GitHubConfig.folderKeepFile) continue;
+
+      // Solo si GitHub confirma que se ha borrado, y solo para ficheros: una
+      // carpeta que ya no está en la rama de trabajo se sigue enseñando para
+      // poder entrar y resolver lo que hay dentro.
+      final isDeletion = file.type != 'dir' && removedPaths.contains(path);
+      if (!isDeletion) {
+        debugPrint(
+          '[Versiona] "$path" está en "$_validatedBranch" pero no en '
+          '"$_workBranch", y la comparación no lo da por borrado: se enseña '
+          'como validado.',
+        );
+      }
+      entries.add(
+        DriveEntry.fromGitHubFile(
+          file,
+          pendingChange:
+              isDeletion
+                  ? PendingChange(path: path, kind: PendingChangeKind.deleted)
+                  : null,
+        ),
+      );
+    }
 
     entries.sort((a, b) {
       if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
       return a.name.toLowerCase().compareTo(b.name.toLowerCase());
     });
-
     return entries;
   }
 
-  /// Rutas -> sha de cada entrada de [folderPath] tal y como está en la
-  /// rama validada, para poder comparar con la rama de revisión.
-  Future<Map<String, String>> _validatedShasFor(String folderPath) async {
+  /// Entradas sin ningún cambio pendiente, ya ordenadas.
+  List<DriveEntry> _asEntries(List<GitHubFile> files) {
+    final entries = [
+      for (final file in files)
+        if (file.name != GitHubConfig.folderKeepFile)
+          DriveEntry.fromGitHubFile(file),
+    ];
+    entries.sort((a, b) {
+      if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return entries;
+  }
+
+  /// Contenido de [folderPath] en [ref]. Si la carpeta no existe ahí, o la
+  /// rama todavía no tiene nada, devuelve una lista vacía.
+  Future<List<GitHubFile>> _treeOf(
+    String folderPath,
+    String ref, {
+    bool retry = false,
+  }) async {
+    Future<RepositoryContents> read() =>
+        _github.repositories.getContents(slug, folderPath, ref: ref);
+
     try {
-      final validated = await _github.repositories.getContents(
-        slug,
-        folderPath,
-        ref: _validatedBranch,
+      final contents = retry ? await _withRetry(read) : await read();
+      if (!contents.isDirectory) return const [];
+      return contents.tree ?? const [];
+    } on GitHubError catch (e) {
+      // getContents() no conserva el código HTTP real, así que no se puede
+      // distinguir "no existe" de "ha fallado". Si la rama sí existe, un
+      // error aquí es de verdad: devolver una lista vacía dejaría la carpeta
+      // como si se hubieran perdido los ficheros.
+      if (await _branchTipSha(ref) == null) return const [];
+      debugPrint(
+        '[Versiona] No se pudo leer "$folderPath" en "$ref": ${e.message}',
       );
-      if (!validated.isDirectory) return const {};
-      return {
-        for (final f in validated.tree ?? const <GitHubFile>[])
-          if (f.path != null && f.sha != null) f.path!: f.sha!,
-      };
-    } on GitHubError {
-      // getContents() no conserva el código HTTP real: cualquier error de
-      // GitHub con un campo "message" llega aquí como GitHubError genérico
-      // en vez del NotFound tipado. En la práctica, para esta llamada
-      // concreta, casi siempre significa que esta carpeta todavía no existe
-      // en la rama validada: todo lo que haya aquí está pendiente de
-      // aprobación.
-      return const {};
+      if (ref == _validatedBranch) return const [];
+      rethrow;
     }
   }
 
-  /// Sube (crea o actualiza) un fichero dentro de [folderPath].
+  // ---------------------------------------------------------------------
+  // Cambios pendientes
+  // ---------------------------------------------------------------------
+
+  /// Todo lo que está pendiente de aprobación en el espacio.
+  ///
+  /// Sale de **una** comparación entre la versión aprobada y la de trabajo.
+  /// El "quién y cuándo" de cada fichero se consulta aparte (la comparación
+  /// no lo trae por fichero), en paralelo y solo para lo que ha cambiado.
+  Future<List<PendingChange>> pendingChanges({bool forceRefresh = false}) async {
+    final cached = _pendingCache;
+    if (!forceRefresh && cached != null) return cached;
+
+    final changes = PendingChange.fromComparison(
+      await _comparedFiles(forceRefresh: forceRefresh),
+    );
+    final detailed = await Future.wait(
+      changes.map((change) async {
+        try {
+          final commits =
+              await _github.repositories
+                  .listCommits(slug, path: change.path, sha: _workBranch)
+                  .take(20)
+                  .toList();
+          return change.withHistory(commits);
+        } catch (_) {
+          return change;
+        }
+      }),
+    );
+
+    _pendingCache = detailed;
+    return detailed;
+  }
+
+  /// Los ficheros que difieren entre la versión aprobada y la de trabajo, tal
+  /// y como los ve GitHub. Es **una** llamada, y de aquí sale tanto la lista
+  /// de cambios pendientes como qué está pendiente de borrarse.
+  Future<List<CommitFile>> _comparedFiles({bool forceRefresh = false}) async {
+    final cached = _comparedCache;
+    if (!forceRefresh && cached != null) return cached;
+
+    try {
+      final comparison = await _github.repositories.compareCommits(
+        slug,
+        _validatedBranch,
+        _workBranch,
+      );
+      final files = comparison.files ?? const <CommitFile>[];
+      _comparedCache = files;
+      return files;
+    } on GitHubError catch (e) {
+      debugPrint('[Versiona] No se pudo comparar las ramas: ${e.message}');
+      return const [];
+    }
+  }
+
+  /// Rutas que la comparación da por eliminadas en la rama de trabajo.
+  Future<Set<String>> _removedPaths({bool forceRefresh = false}) async {
+    return {
+      for (final file in await _comparedFiles(forceRefresh: forceRefresh))
+        if (file.status == 'removed' && file.name != null) file.name!,
+    };
+  }
+
+  Future<PendingChange?> pendingChangeFor(String path) async {
+    for (final change in await pendingChanges()) {
+      if (change.path == path) return change;
+    }
+    return null;
+  }
+
+  /// Impide mover o borrar una carpeta que tenga cambios pendientes dentro,
+  /// para no dejar a medias algo que alguien está revisando.
+  Future<void> _assertNoPendingInside(String folderPath) async {
+    final inside =
+        (await pendingChanges())
+            .where((c) => c.path.startsWith('$folderPath/'))
+            .toList();
+    if (inside.isEmpty) return;
+
+    final names = inside.take(3).map((c) => c.name).join(', ');
+    final rest = inside.length > 3 ? ' y ${inside.length - 3} más' : '';
+    throw StateError(
+      'Esta carpeta tiene ${inside.length} '
+      '${inside.length == 1 ? "cambio pendiente" : "cambios pendientes"} '
+      'dentro ($names$rest). Apruébalos o recházalos antes de moverla o '
+      'eliminarla.',
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // Escrituras (siempre sobre la rama de trabajo)
+  // ---------------------------------------------------------------------
+
+  /// Sube (crea o actualiza) un fichero dentro de [folderPath]. Devuelve la
+  /// entrada resultante para poder reflejarla en la vista al momento, sin
+  /// esperar a una relectura que puede tardar en ponerse al día.
   ///
   /// [commitMessage] es el motivo del cambio que ve el usuario (p.ej. "Ajuste
   /// de IVA proveedor X"). Si se omite o queda vacío, se usa un mensaje
   /// genérico.
-  Future<void> uploadFile({
+  Future<DriveEntry> uploadFile({
     required String folderPath,
     required String fileName,
     required List<int> bytes,
@@ -269,119 +519,226 @@ class DriveService {
     final path = _joinPath(folderPath, fileName);
     final content = base64Encode(bytes);
 
-    GitHubFile? existing;
-    try {
-      final current = await _github.repositories.getContents(
-        slug,
-        path,
-        ref: _workingBranch,
-      );
-      existing = current.isFile ? current.file : null;
-    } on GitHubError catch (e) {
-      // Igual que en _validatedShasFor: getContents() lanza un GitHubError
-      // genérico (no el NotFound tipado) cuando el fichero todavía no
-      // existe en la rama de revisión, que es el caso normal al subir algo
-      // por primera vez.
-      debugPrint(
-        '[Versiona] getContents("$path", ref: "$_workingBranch") → '
-        '${e.runtimeType}: ${e.message}. Se asume que no existe todavía.',
-      );
-      existing = null;
-    }
+    final existing = await _fileAt(path, _workBranch);
+    final approved = await _fileAt(path, _validatedBranch);
 
     final hasCustomMessage =
         commitMessage != null && commitMessage.trim().isNotEmpty;
+    final isUpdate = existing?.sha != null;
 
-    debugPrint(
-      '[Versiona] Subiendo "$path" a la rama "$_workingBranch" '
-      '(${existing?.sha != null ? "actualizar" : "crear"})',
+    final uploaded = await _writeFile(
+      path: path,
+      base64Content: content,
+      message:
+          hasCustomMessage
+              ? commitMessage.trim()
+              : (isUpdate ? 'Actualizar $fileName' : 'Subir $fileName'),
+      branch: _workBranch,
+      sha: isUpdate ? existing!.sha : null,
     );
+    _invalidatePending();
 
-    try {
-      if (existing?.sha != null) {
-        await _github.repositories.updateFile(
-          slug,
-          path,
-          hasCustomMessage ? commitMessage.trim() : 'Actualizar $fileName',
-          content,
-          existing!.sha!,
-          branch: _workingBranch,
-        );
-      } else {
-        await _github.repositories.createFile(
-          slug,
-          CreateFile(
-            path: path,
-            content: content,
-            message:
-                hasCustomMessage ? commitMessage.trim() : 'Subir $fileName',
-            branch: _workingBranch,
-          ),
-        );
-      }
-      debugPrint('[Versiona] Subida de "$path" completada.');
-    } catch (e, stackTrace) {
-      debugPrint('[Versiona] Fallo al subir "$path": $e\n$stackTrace');
-      rethrow;
-    }
-  }
-
-  /// Crea una carpeta vacía mediante un fichero "placeholder" invisible
-  /// para el usuario (Git no versiona directorios vacíos).
-  Future<void> createFolder({
-    required String folderPath,
-    required String name,
-  }) async {
-    final placeholderPath = _joinPath(
-      _joinPath(folderPath, name),
-      GitHubConfig.folderKeepFile,
-    );
-    await _github.repositories.createFile(
-      slug,
-      CreateFile(
-        path: placeholderPath,
-        content: base64Encode(
-          utf8.encode(
-            'Este fichero mantiene la carpeta "$name" en Versiona.\n',
-          ),
-        ),
-        message: 'Crear carpeta $name',
-        branch: _workingBranch,
+    return DriveEntry.fromGitHubFile(
+      uploaded,
+      pendingChange: PendingChange(
+        path: path,
+        // Lo que decide el tipo es la comparación con la versión aprobada,
+        // no la última acción: volver a subir algo que aún era nuevo lo deja
+        // nuevo.
+        kind:
+            approved == null
+                ? PendingChangeKind.added
+                : PendingChangeKind.modified,
+        message: hasCustomMessage ? commitMessage.trim() : null,
+        commitCount: 1,
+        updatedAt: DateTime.now(),
       ),
     );
   }
 
-  /// Elimina un fichero, o una carpeta entera (y todo su contenido).
-  Future<void> deleteEntry(DriveEntry entry) async {
-    if (!entry.isFolder) {
-      await _github.repositories.deleteFile(
+  /// Crea o actualiza un fichero, comprobando que GitHub lo haya aceptado.
+  ///
+  /// `createFile` y `updateFile` del paquete **no lanzan excepción cuando la
+  /// escritura falla**: no le dicen a la petición qué código HTTP esperan, así
+  /// que un 404/409/422 se convierte en una respuesta que se intenta
+  /// interpretar igualmente. Sin esta comprobación, aprobar un cambio podría
+  /// decir "hecho" sin haber escrito nada, y el cambio seguiría pendiente.
+  Future<GitHubFile> _writeFile({
+    required String path,
+    required String base64Content,
+    required String message,
+    required String branch,
+    String? sha,
+  }) async {
+    final ContentCreation creation;
+    if (sha == null) {
+      creation = await _github.repositories.createFile(
         slug,
-        entry.path,
-        'Eliminar ${entry.name}',
-        entry.sha!,
-        _workingBranch,
+        CreateFile(
+          path: path,
+          content: base64Content,
+          message: message,
+          branch: branch,
+        ),
       );
-      return;
+    } else {
+      creation = await _github.repositories.updateFile(
+        slug,
+        path,
+        message,
+        base64Content,
+        sha,
+        branch: branch,
+      );
     }
 
-    final files = await _collectFilesRecursively(entry.path);
+    final written = creation.content;
+    if (written?.sha == null) {
+      throw StateError(
+        'GitHub no ha aceptado guardar "$path" en la rama "$branch".',
+      );
+    }
+    debugPrint('[Versiona] Escrito "$path" en "$branch".');
+    return written!;
+  }
+
+  /// Contenido de [file] en base64 y sin saltos de línea, listo para volver a
+  /// escribirlo tal cual.
+  ///
+  /// La API de "contents" de GitHub **no devuelve el contenido de los ficheros
+  /// de más de 1 MB**: contesta con la cadena vacía y hay que pedir el blob
+  /// por su sha. Sin esto, copiar un fichero grande (al aprobarlo, al moverlo
+  /// o al rechazarlo) guardaba un fichero vacío, y como el contenido ya no
+  /// coincidía se quedaba "Modificado" para siempre por mucho que se aprobara.
+  Future<String> _contentOf(GitHubFile file) async {
+    final inline = file.content;
+    if (inline != null && inline.trim().isNotEmpty) {
+      return inline.replaceAll('\n', '');
+    }
+
+    final sha = file.sha;
+    if (sha == null) {
+      throw StateError('No se pudo leer el contenido de "${file.path}".');
+    }
+
+    debugPrint(
+      '[Versiona] "${file.path}" no viene con contenido (${file.size} bytes): '
+      'se pide el blob $sha.',
+    );
+    final blob = await _github.git.getBlob(slug, sha);
+    final content = blob.content;
+    if (content == null || content.trim().isEmpty) {
+      throw StateError('No se pudo leer el contenido de "${file.path}".');
+    }
+    return content.replaceAll('\n', '');
+  }
+
+  /// El fichero en [path] dentro de [ref], o `null` si no está ahí.
+  Future<GitHubFile?> _fileAt(String path, String ref) async {
+    try {
+      final contents = await _github.repositories.getContents(
+        slug,
+        path,
+        ref: ref,
+      );
+      return contents.isFile ? contents.file : null;
+    } on GitHubError {
+      return null;
+    }
+  }
+
+  /// Crea una carpeta vacía mediante un fichero "placeholder" invisible para
+  /// el usuario (Git no versiona carpetas vacías).
+  Future<DriveEntry> createFolder({
+    required String folderPath,
+    required String name,
+  }) async {
+    final path = _joinPath(folderPath, name);
+    await _writeFile(
+      path: _joinPath(path, GitHubConfig.folderKeepFile),
+      base64Content: base64Encode(
+        utf8.encode('Este fichero mantiene la carpeta "$name" en Versiona.\n'),
+      ),
+      message: 'Crear carpeta $name',
+      branch: _workBranch,
+    );
+    _invalidatePending();
+
+    return DriveEntry(
+      name: name,
+      path: path,
+      type: DriveEntryType.folder,
+      pendingChange: PendingChange(
+        path: path,
+        kind: PendingChangeKind.added,
+        message: 'Crear carpeta $name',
+        commitCount: 1,
+        updatedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  /// Elimina un fichero, o una carpeta entera (y todo su contenido), de la
+  /// rama de trabajo.
+  ///
+  /// La versión aprobada **no se toca**: mientras no se apruebe la baja, la
+  /// entrada se sigue viendo marcada como pendiente de eliminarse. Devuelve
+  /// cómo queda, o `null` si desaparece del todo (era algo que nunca llegó a
+  /// aprobarse, así que no queda nada que revisar).
+  Future<DriveEntry?> deleteEntry(DriveEntry entry) async {
+    if (entry.isFolder) await _assertNoPendingInside(entry.path);
+
+    final files =
+        entry.isFolder
+            ? await _collectFilesRecursively(entry.path, ref: _workBranch)
+            : [
+              await _fileAt(entry.path, _workBranch),
+            ].whereType<GitHubFile>().toList();
+
+    // Uno detrás de otro, no en paralelo: la API de "contents" crea un commit
+    // por llamada a partir de la punta de la rama, así que varias escrituras
+    // simultáneas sobre la misma rama se pisan y dan conflictos (409).
     for (final file in files) {
       await _github.repositories.deleteFile(
         slug,
         file.path!,
-        'Eliminar carpeta ${entry.name}',
+        entry.isFolder ? 'Eliminar carpeta ${entry.name}' : 'Eliminar ${entry.name}',
         file.sha!,
-        _workingBranch,
+        _workBranch,
       );
     }
+    _invalidatePending();
+
+    // Si tampoco existe en la versión aprobada, no hay ninguna baja que
+    // revisar: simplemente ya no está.
+    final approved = await _fileAt(entry.path, _validatedBranch);
+    final existsApproved =
+        entry.isFolder
+            ? (await _treeOf(entry.path, _validatedBranch)).isNotEmpty
+            : approved != null;
+    if (!existsApproved) return null;
+
+    return entry.withPendingChange(
+      PendingChange(
+        path: entry.path,
+        kind: PendingChangeKind.deleted,
+        message: 'Eliminar ${entry.name}',
+        commitCount: 1,
+        updatedAt: DateTime.now(),
+      ),
+    );
   }
 
-  Future<List<GitHubFile>> _collectFilesRecursively(String path) async {
-    final contents = await _github.repositories.getContents(
-      slug,
-      path,
-      ref: _workingBranch,
-    );
+  Future<List<GitHubFile>> _collectFilesRecursively(
+    String path, {
+    required String ref,
+  }) async {
+    final RepositoryContents contents;
+    try {
+      contents = await _github.repositories.getContents(slug, path, ref: ref);
+    } on GitHubError {
+      return const [];
+    }
     if (contents.isFile) {
       return contents.file != null ? [contents.file!] : [];
     }
@@ -389,7 +746,7 @@ class DriveService {
     final result = <GitHubFile>[];
     for (final entry in contents.tree ?? <GitHubFile>[]) {
       if (entry.type == 'dir') {
-        result.addAll(await _collectFilesRecursively(entry.path!));
+        result.addAll(await _collectFilesRecursively(entry.path!, ref: ref));
       } else {
         result.add(entry);
       }
@@ -397,20 +754,17 @@ class DriveService {
     return result;
   }
 
-  /// Contenido en bruto de [path] tal y como está en la rama de revisión,
-  /// para poder previsualizarlo (imagen, PDF, hoja de cálculo...) sin
-  /// necesidad de descargarlo primero.
+  /// Contenido en bruto de [path] para poder previsualizarlo (imagen, PDF,
+  /// hoja de cálculo...) sin necesidad de descargarlo primero.
   Future<Uint8List> fetchFileBytes(String path) async {
-    final contents = await _github.repositories.getContents(
-      slug,
-      path,
-      ref: _workingBranch,
+    final contents = await _withRetry(
+      () => _github.repositories.getContents(slug, path, ref: _workBranch),
     );
-    final content = contents.file?.content;
-    if (content == null) {
+    final file = contents.file;
+    if (file == null) {
       throw StateError('No se pudo leer el contenido de este fichero.');
     }
-    return base64Decode(content.replaceAll('\n', ''));
+    return base64Decode(await _contentOf(file));
   }
 
   /// Historial de versiones (commits) que han afectado a [path], del más
@@ -418,7 +772,7 @@ class DriveService {
   Future<List<FileVersion>> fileHistory(String path) async {
     final commits =
         await _github.repositories
-            .listCommits(slug, path: path, sha: _workingBranch)
+            .listCommits(slug, path: path, sha: _workBranch)
             .toList();
     return commits.map(FileVersion.fromCommit).toList();
   }
@@ -436,52 +790,48 @@ class DriveService {
       ref: versionSha,
     );
     final oldFile = oldContents.file;
-    if (oldFile?.content == null) {
+    if (oldFile == null) {
       throw StateError('No se pudo leer esa versión del fichero.');
     }
 
-    final current = await _github.repositories.getContents(
-      slug,
-      path,
-      ref: _workingBranch,
-    );
-    final currentSha = current.file?.sha;
-    if (currentSha == null) {
+    final current = await _fileAt(path, _workBranch);
+    if (current?.sha == null) {
       throw StateError('El fichero ya no existe en su ubicación actual.');
     }
 
-    final rawContent = oldFile!.content!.replaceAll('\n', '');
-    await _github.repositories.updateFile(
-      slug,
-      path,
-      'Restaurar $fileName a una versión anterior',
-      rawContent,
-      currentSha,
-      branch: _workingBranch,
+    await _writeFile(
+      path: path,
+      base64Content: await _contentOf(oldFile),
+      message: 'Restaurar $fileName a una versión anterior',
+      branch: _workBranch,
+      sha: current!.sha,
     );
+    _invalidatePending();
   }
 
   /// Enlace a la vista de GitHub para inspeccionar un fichero en detalle.
   String webUrlFor(String path) =>
-      'https://github.com/${slug.fullName}/blob/$_workingBranch/$path';
-
-  String _parentPath(String path) {
-    final index = path.lastIndexOf('/');
-    return index == -1 ? '' : path.substring(0, index);
-  }
+      'https://github.com/${slug.fullName}/blob/$_workBranch/$path';
 
   /// Cambia el nombre de [entry] manteniéndolo en la misma carpeta.
-  Future<void> rename({
+  Future<DriveEntry> rename({
     required DriveEntry entry,
     required String newName,
   }) async {
     final newPath = _joinPath(_parentPath(entry.path), newName);
-    await _movePath(entry: entry, newPath: newPath);
+    return _movePath(
+      entry: entry,
+      newPath: newPath,
+      message:
+          entry.isFolder
+              ? 'Renombrar la carpeta "${entry.name}" a "$newName"'
+              : 'Renombrar "${entry.name}" a "$newName"',
+    );
   }
 
   /// Mueve [entry] a la carpeta [destinationFolderPath] (cadena vacía para
   /// la raíz), conservando su nombre.
-  Future<void> move({
+  Future<DriveEntry> move({
     required DriveEntry entry,
     required String destinationFolderPath,
   }) async {
@@ -492,191 +842,272 @@ class DriveService {
     }
 
     final newPath = _joinPath(destinationFolderPath, entry.name);
-    await _movePath(entry: entry, newPath: newPath);
+    final destination =
+        destinationFolderPath.isEmpty
+            ? 'la carpeta principal'
+            : '"$destinationFolderPath"';
+    return _movePath(
+      entry: entry,
+      newPath: newPath,
+      message:
+          entry.isFolder
+              ? 'Mover la carpeta "${entry.name}" a $destination'
+              : 'Mover "${entry.name}" a $destination',
+    );
   }
 
-  /// Mueve/renombra [entry] a [newPath], recorriendo recursivamente su
-  /// contenido si es una carpeta. GitHub no tiene una operación nativa de
-  /// mover: se recrea cada fichero en la ruta nueva y se borra el original.
-  Future<void> _movePath({
+  /// Mueve/renombra [entry] a [newPath] dentro de la rama de trabajo. GitHub
+  /// no tiene una operación nativa de mover: se recrea cada fichero en la
+  /// ruta nueva y se borra el original.
+  Future<DriveEntry> _movePath({
     required DriveEntry entry,
     required String newPath,
+    required String message,
   }) async {
-    if (newPath == entry.path) return;
+    if (newPath == entry.path) return entry;
+    if (entry.isFolder) await _assertNoPendingInside(entry.path);
 
-    if (!entry.isFolder) {
-      final current = await _github.repositories.getContents(
-        slug,
-        entry.path,
-        ref: _workingBranch,
+    final files =
+        entry.isFolder
+            ? await _collectFilesRecursively(entry.path, ref: _workBranch)
+            : [
+              await _fileAt(entry.path, _workBranch),
+            ].whereType<GitHubFile>().toList();
+    if (files.isEmpty) {
+      throw StateError('No se pudo leer lo que se quiere mover.');
+    }
+
+    // Las lecturas van en paralelo (son GET independientes). Las escrituras,
+    // una detrás de otra: la API de "contents" crea un commit por llamada
+    // desde la punta de la rama y varias a la vez se pisan. Primero se crean
+    // las copias nuevas y solo después se borran los originales, para no
+    // perder datos si algo falla a mitad.
+    final contents = await Future.wait(
+      files.map(
+        (file) => _github.repositories.getContents(
+          slug,
+          file.path!,
+          ref: _workBranch,
+        ),
+      ),
+    );
+
+    for (var i = 0; i < files.length; i++) {
+      final file = contents[i].file;
+      if (file == null) continue;
+      final destination =
+          entry.isFolder
+              ? '$newPath/${files[i].path!.substring(entry.path.length + 1)}'
+              : newPath;
+      await _writeFile(
+        path: destination,
+        base64Content: await _contentOf(file),
+        message: message,
+        branch: _workBranch,
       );
-      final file = current.file;
-      if (file?.content == null || file?.sha == null) {
-        throw StateError('No se pudo leer el fichero.');
+    }
+    for (final file in files) {
+      await _github.repositories.deleteFile(
+        slug,
+        file.path!,
+        message,
+        file.sha!,
+        _workBranch,
+      );
+    }
+    _invalidatePending();
+
+    final index = newPath.lastIndexOf('/');
+    return DriveEntry(
+      name: index == -1 ? newPath : newPath.substring(index + 1),
+      path: newPath,
+      type: entry.type,
+      sha: entry.sha,
+      size: entry.size,
+      pendingChange:
+          entry.isFolder
+              ? null
+              : PendingChange(
+                path: newPath,
+                kind: PendingChangeKind.added,
+                message: message,
+                commitCount: 1,
+                updatedAt: DateTime.now(),
+              ),
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // Aprobar / rechazar
+  // ---------------------------------------------------------------------
+
+  /// Aprueba [changes]: lleva cada fichero a la versión aprobada tal y como
+  /// está en la rama de trabajo, o lo borra allí si lo pendiente era una baja.
+  ///
+  /// No hay fusión de ramas: es un commit por fichero sobre la rama aprobada,
+  /// así que no pueden aparecer conflictos. Se procesan **en serie** porque
+  /// cada commit parte de la punta de la rama. Devuelve el resultado de cada
+  /// uno por separado, para poder informar de éxitos parciales.
+  Future<List<ChangeResult>> approveChanges(
+    List<PendingChange> changes, {
+    String? summary,
+  }) async {
+    final hasSummary = summary != null && summary.trim().isNotEmpty;
+    final results = <ChangeResult>[];
+
+    for (final change in changes) {
+      try {
+        final message =
+            hasSummary
+                ? summary.trim()
+                : 'Aprobar ${change.kind == PendingChangeKind.deleted ? "la baja de " : ""}${change.name}';
+        await _publish(change, message);
+        results.add(ChangeResult(change));
+      } catch (e) {
+        results.add(ChangeResult(change, error: _describeFailure(e)));
       }
-      await _github.repositories.createFile(
-        slug,
-        CreateFile(
-          path: newPath,
-          content: file!.content!.replaceAll('\n', ''),
-          message: 'Mover ${entry.name}',
-          branch: _workingBranch,
-        ),
-      );
-      await _github.repositories.deleteFile(
-        slug,
-        entry.path,
-        'Mover ${entry.name}',
-        file.sha!,
-        _workingBranch,
-      );
-      return;
     }
-
-    final files = await _collectFilesRecursively(entry.path);
-    final basePath = entry.path;
-    final pendingCreations = <MapEntry<String, String>>[];
-
-    for (final file in files) {
-      final relative = file.path!.substring(basePath.length + 1);
-      final destinationPath = '$newPath/$relative';
-      final contents = await _github.repositories.getContents(
-        slug,
-        file.path!,
-        ref: _workingBranch,
-      );
-      final content = contents.file?.content;
-      if (content == null) continue;
-      pendingCreations.add(
-        MapEntry(destinationPath, content.replaceAll('\n', '')),
-      );
-    }
-
-    // Primero se crean todas las copias nuevas y solo después se borran los
-    // originales, para no perder datos si algo falla a mitad de camino.
-    for (final creation in pendingCreations) {
-      await _github.repositories.createFile(
-        slug,
-        CreateFile(
-          path: creation.key,
-          content: creation.value,
-          message: 'Mover ${entry.name}',
-          branch: _workingBranch,
-        ),
-      );
-    }
-    for (final file in files) {
-      await _github.repositories.deleteFile(
-        slug,
-        file.path!,
-        'Mover ${entry.name}',
-        file.sha!,
-        _workingBranch,
-      );
-    }
+    _invalidatePending();
+    return results;
   }
 
-  /// Descarta los cambios pendientes de [path] en la rama de revisión: lo
-  /// deja tal y como está en la rama validada, o lo borra directamente de
-  /// la rama de revisión si nunca llegó a aprobarse (fichero nuevo).
-  ///
-  /// A diferencia de [approveAndConsolidate], esto afecta solo a este
-  /// fichero, no a toda la rama de revisión.
-  Future<void> rejectChanges({
-    required String path,
-    required String fileName,
-  }) async {
-    final pending = await _github.repositories.getContents(
-      slug,
-      path,
-      ref: _workingBranch,
-    );
-    final pendingSha = pending.file?.sha;
-    if (pendingSha == null) {
-      throw StateError('No se pudo leer el fichero pendiente de revisión.');
-    }
+  /// Lleva un cambio concreto a la versión aprobada.
+  Future<void> _publish(PendingChange change, String message) async {
+    // Las dos lecturas a la vez: son independientes y así se ahorra un viaje
+    // de ida y vuelta, que es lo que más se nota al aprobar varios seguidos.
+    final [approved, working] = await Future.wait([
+      _fileAt(change.path, _validatedBranch),
+      _fileAt(change.path, _workBranch),
+    ]);
 
-    GitHubFile? validatedFile;
-    try {
-      final validated = await _github.repositories.getContents(
-        slug,
-        path,
-        ref: _validatedBranch,
-      );
-      validatedFile = validated.file;
-    } on GitHubError {
-      // Igual que en _validatedShasFor: no existe (todavía) en la rama
-      // validada, así que rechazar equivale a borrarlo de la de revisión.
-      validatedFile = null;
-    }
-
-    if (validatedFile?.content == null) {
+    if (change.kind == PendingChangeKind.deleted) {
+      if (approved?.sha == null) return; // Ya no estaba: nada que hacer.
       await _github.repositories.deleteFile(
         slug,
-        path,
-        'Rechazar cambios en $fileName',
-        pendingSha,
-        _workingBranch,
-      );
-      return;
-    }
-
-    await _github.repositories.updateFile(
-      slug,
-      path,
-      'Rechazar cambios en $fileName',
-      validatedFile!.content!.replaceAll('\n', ''),
-      pendingSha,
-      branch: _workingBranch,
-    );
-  }
-
-  /// Aprueba todos los cambios pendientes: fusiona la rama de revisión
-  /// sobre la rama validada con un commit de fusión real (no se reescribe
-  /// ni se pierde historial).
-  ///
-  /// Nota: fusiona TODO lo que haya en la rama de revisión, no solo el
-  /// fichero desde el que se llame a esta acción, porque de momento hay
-  /// una única rama compartida para todos los cambios pendientes.
-  ///
-  /// De momento cualquier persona con la app conectada puede aprobar: no
-  /// hay todavía un rol de "supervisor" restringido por permisos.
-  Future<void> approveAndConsolidate({String? summary}) async {
-    final GitHubComparison comparison;
-    try {
-      comparison = await _github.repositories.compareCommits(
-        slug,
+        change.path,
+        message,
+        approved!.sha!,
         _validatedBranch,
-        _workingBranch,
       );
-    } on GitHubError catch (e) {
-      throw StateError(
-        'No se pudo comprobar los cambios pendientes entre '
-        '"$_validatedBranch" y "$_workingBranch": ${e.message}',
-      );
+      return;
     }
 
-    if ((comparison.aheadBy ?? 0) == 0) {
-      throw StateError('No hay cambios pendientes de aprobar.');
+    if (working == null) {
+      throw StateError('El fichero ya no está en la rama de trabajo.');
     }
+    final raw = await _contentOf(working);
 
-    try {
-      await _github.repositories.merge(
+    await _writeFile(
+      path: change.path,
+      base64Content: raw,
+      message: message,
+      branch: _validatedBranch,
+      sha: approved?.sha,
+    );
+  }
+
+  /// Rechaza [changes]: devuelve cada fichero a como estaba en la versión
+  /// aprobada, o lo quita de la rama de trabajo si nunca llegó a aprobarse.
+  Future<List<ChangeResult>> rejectChanges(List<PendingChange> changes) async {
+    final results = <ChangeResult>[];
+    for (final change in changes) {
+      try {
+        await _revert(change);
+        results.add(ChangeResult(change));
+      } catch (e) {
+        results.add(ChangeResult(change, error: _describeFailure(e)));
+      }
+    }
+    _invalidatePending();
+    return results;
+  }
+
+  Future<void> _revert(PendingChange change) async {
+    final [approved, working] = await Future.wait([
+      _fileAt(change.path, _validatedBranch),
+      _fileAt(change.path, _workBranch),
+    ]);
+    final message = 'Rechazar los cambios de ${change.name}';
+
+    // Nunca se aprobó: rechazarlo es quitarlo de la rama de trabajo.
+    if (approved == null) {
+      if (working?.sha == null) return;
+      await _github.repositories.deleteFile(
         slug,
-        CreateMerge(
-          _validatedBranch,
-          _workingBranch,
-          commitMessage:
-              (summary != null && summary.trim().isNotEmpty)
-                  ? summary.trim()
-                  : 'Aprobar y consolidar cambios pendientes',
-        ),
+        change.path,
+        message,
+        working!.sha!,
+        _workBranch,
       );
-    } on GitHubError catch (e) {
-      throw StateError(
-        'No se pudo fusionar "$_workingBranch" sobre '
-        '"$_validatedBranch": ${e.message}',
-      );
+      return;
     }
+
+    final raw = await _contentOf(approved);
+
+    // Estaba pendiente de borrarse: rechazar esa baja lo devuelve.
+    if (working?.sha == null) {
+      await _writeFile(
+        path: change.path,
+        base64Content: raw,
+        message: 'Rechazar la baja de ${change.name}',
+        branch: _workBranch,
+      );
+      return;
+    }
+
+    await _writeFile(
+      path: change.path,
+      base64Content: raw,
+      message: message,
+      branch: _workBranch,
+      sha: working!.sha,
+    );
+  }
+
+  /// Motivo legible de un fallo, sin el "Bad state:" que antepone Dart.
+  String _describeFailure(Object error) {
+    if (error is GitHubError) return error.message ?? '$error';
+    if (error is StateError) return error.message;
+    return '$error';
+  }
+
+  // ---------------------------------------------------------------------
+  // Recuperación de las ramas por cambio de la versión anterior
+  // ---------------------------------------------------------------------
+
+  /// Ramas sueltas que dejó la versión que guardaba un cambio por rama.
+  Future<List<String>> leftoverChangeBranches() async {
+    try {
+      final branches = await _github.repositories.listBranches(slug).toList();
+      return branches
+          .map((b) => b.name)
+          .whereType<String>()
+          .where((n) => n.startsWith(GitHubConfig.legacyChangeBranchPrefix))
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Trae a la rama de trabajo lo que quedara en esas ramas sueltas y las
+  /// borra, para dejar el espacio funcionando solo con las dos ramas.
+  Future<void> recoverLeftoverChangeBranches() async {
+    for (final branch in await leftoverChangeBranches()) {
+      try {
+        await _github.repositories.merge(
+          slug,
+          CreateMerge(
+            _workBranch,
+            branch,
+            commitMessage: 'Recuperar un cambio pendiente suelto',
+          ),
+        );
+      } catch (e) {
+        // Puede que no hubiera nada que traer; se borra igualmente.
+        debugPrint('[Versiona] Nada que fusionar de "$branch": $e');
+      }
+      await _github.git.deleteReference(slug, 'heads/$branch');
+    }
+    _invalidatePending();
   }
 }
