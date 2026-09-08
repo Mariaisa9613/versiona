@@ -39,24 +39,41 @@ class AuthController extends ChangeNotifier {
     SecureStorageService? storage,
     GitHubDeviceAuthService? deviceAuth,
     GitHubWebAuthService? webAuth,
+    http.Client? httpClient,
   }) : _storage = storage ?? SecureStorageService(),
        _deviceAuth = deviceAuth ?? GitHubDeviceAuthService(),
-       _webAuth = webAuth ?? GitHubWebAuthService();
+       _webAuth = webAuth ?? GitHubWebAuthService(),
+       _httpClient = httpClient ?? http.Client();
 
   final SecureStorageService _storage;
   final GitHubDeviceAuthService _deviceAuth;
   final GitHubWebAuthService _webAuth;
+
+  /// Cliente con el que se habla con la API de GitHub. Inyectable para
+  /// poder probar en los tests qué pasa ante cada respuesta suya.
+  final http.Client _httpClient;
 
   Timer? _pollTimer;
   DeviceCodeRequest? _activeRequest;
   DateTime? _pollDeadline;
   int _pollIntervalSeconds = 5;
 
+  /// Hay una comprobación del código en vuelo. Cancelar el temporizador no
+  /// cancela la petición, así que sin esto volver a primer plano podía
+  /// dejar dos sondeos vivos, cada uno reprogramando el suyo.
+  bool _pollInFlight = false;
+
   AuthStatus status = AuthStatus.checking;
   DeviceCodeRequest? deviceCodeRequest;
   String? errorMessage;
   CurrentUser? currentUser;
   DriveService? driveService;
+
+  /// `true` cuando el último intento falló por algo pasajero (GitHub caído,
+  /// límite de peticiones, sin conexión) y no por un token rechazado: la
+  /// sesión guardada sigue siendo válida y se puede reintentar con
+  /// [retrySavedSession], sin repetir el inicio de sesión entero.
+  bool canRetrySavedSession = false;
 
   /// Nombre autogenerado que se ofrece como punto de partida en
   /// [AuthStatus.choosingWorkspaceName]; el usuario puede aceptarlo tal
@@ -113,6 +130,9 @@ class AuthController extends ChangeNotifier {
   }
 
   Future<void> startSignIn() async {
+    // Se empieza un login nuevo: la sesión guardada anterior ya no es lo
+    // que se está reintentando.
+    canRetrySavedSession = false;
     if (!GitHubConfig.isGitHubClientIdConfigured) {
       errorMessage =
           'Falta configurar el Client ID de GitHub en '
@@ -152,7 +172,21 @@ class AuthController extends ChangeNotifier {
       // En móvil, tras pulsar "Abrir GitHub" el código desaparece de la
       // vista al cambiar de app/pestaña: copiarlo evita que el usuario
       // tenga que memorizarlo.
-      await Clipboard.setData(ClipboardData(text: request.userCode));
+      //
+      // Es una comodidad, no un requisito: ni se espera a que termine ni se
+      // deja que su fallo tumbe el login. Esperarlo dentro del try hacía que
+      // un portapapeles no disponible (pasa en algunos escritorios) abortara
+      // el inicio de sesión entero con un "no se pudo conectar con GitHub"
+      // que no tenía nada que ver. El código sigue en pantalla para
+      // teclearlo a mano, y hay un botón de copiar al lado.
+      unawaited(
+        Clipboard.setData(ClipboardData(text: request.userCode)).catchError((
+          Object e,
+        ) {
+          debugPrint('[Versiona] No se pudo copiar el código al '
+              'portapapeles: $e');
+        }),
+      );
 
       notifyListeners();
       _schedulePoll(Duration(seconds: _pollIntervalSeconds));
@@ -175,6 +209,13 @@ class AuthController extends ChangeNotifier {
   }
 
   Future<void> _poll() async {
+    // Ya hay una comprobación en vuelo (p.ej. checkNowIfWaiting se ha
+    // adelantado al temporizador): dejarla terminar. Sea cual sea su
+    // desenlace, vuelve a programar el sondeo, lo completa o lo cancela,
+    // así que no hace falta hacer nada aquí. Sin este guardia se sondeaba
+    // al doble de ritmo y GitHub respondía "slow_down".
+    if (_pollInFlight) return;
+
     final request = _activeRequest;
     final deadline = _pollDeadline;
     if (request == null || deadline == null) return;
@@ -184,7 +225,27 @@ class AuthController extends ChangeNotifier {
       return;
     }
 
-    final result = await _deviceAuth.checkAccessToken(request);
+    final DevicePollResult result;
+    _pollInFlight = true;
+    try {
+      result = await _deviceAuth.checkAccessToken(request);
+    } catch (e) {
+      // Un corte de red o una respuesta rara de GitHub no invalidan el
+      // código: se reintenta en el siguiente ciclo, y si la cosa no se
+      // arregla acabará caducando por su cuenta con un mensaje claro.
+      //
+      // Antes esta excepción escapaba del callback del Timer sin que nadie
+      // la capturase: el sondeo no se volvía a programar y la pantalla se
+      // quedaba esperando el código para siempre.
+      debugPrint('[Versiona] No se pudo comprobar el código de acceso: $e');
+      if (_activeRequest == request) {
+        _schedulePoll(Duration(seconds: _pollIntervalSeconds));
+      }
+      return;
+    } finally {
+      _pollInFlight = false;
+    }
+
     // La petición pudo tardar; si mientras tanto se canceló o completó el
     // inicio de sesión, no hacer nada más.
     if (_activeRequest != request) return;
@@ -227,6 +288,7 @@ class AuthController extends ChangeNotifier {
   void _failSignIn(String message) {
     _pollTimer?.cancel();
     _activeRequest = null;
+    canRetrySavedSession = false;
     errorMessage = message;
     status = AuthStatus.signedOut;
     notifyListeners();
@@ -245,10 +307,11 @@ class AuthController extends ChangeNotifier {
   Future<void> _completeSignIn(String token, {required bool persist}) async {
     _pollTimer?.cancel();
     _activeRequest = null;
+    canRetrySavedSession = false;
     status = AuthStatus.preparingWorkspace;
     notifyListeners();
 
-    final httpClient = LoggingGitHubClient(http.Client());
+    final httpClient = LoggingGitHubClient(_httpClient);
     try {
       final github = GitHub(
         auth: Authentication.withToken(token),
@@ -295,23 +358,32 @@ class AuthController extends ChangeNotifier {
       status = AuthStatus.choosingWorkspaceName;
       notifyListeners();
     } on GitHubError catch (e) {
-      // GitHub rechazó el token (revocado, expirado o sin permisos): no
-      // tiene sentido conservarlo, o cada arranque repetiría este mismo
-      // error en lugar de mostrar una pantalla de login limpia.
-      if (!isDemoMode) {
+      final httpStatus = httpClient.lastErrorStatusCode;
+      // Solo un 401 significa que GitHub ha rechazado el token (revocado o
+      // caducado): ese sí hay que borrarlo, o cada arranque repetiría el
+      // mismo error en vez de una pantalla de login limpia.
+      //
+      // Cualquier otro fallo (un 5xx de GitHub, un 403 por límite de
+      // peticiones, una caída de red que el paquete envuelve en GitHubError)
+      // es pasajero y no dice nada del token. Borrarlo ahí obligaba a
+      // repetir el device flow entero por una incidencia de unos minutos.
+      final tokenRejected = httpStatus == 401;
+      if (tokenRejected && !isDemoMode) {
         await _storage.clearToken();
       }
-      final httpStatus = httpClient.lastErrorStatusCode;
+      canRetrySavedSession = !tokenRejected;
       // El paquete `github` convierte cualquier 401 en la excepción
       // `AccessForbidden`, con el mensaje fijo "Access Forbidden" (no el
-      // motivo real de GitHub). Como esta rama ya borra el token inválido,
+      // motivo real de GitHub). Como esa rama ya borra el token inválido,
       // basta con pedir al usuario que vuelva a conectar su cuenta.
-      errorMessage = httpStatus == 401
+      errorMessage = tokenRejected
           ? 'Tu sesión de GitHub ha caducado o fue revocada. Vuelve a '
                 'conectar tu cuenta para seguir usando Versiona.'
           : 'No se pudo preparar tu espacio en GitHub: '
                 '${e.message ?? e.runtimeType}'
-                '${httpStatus != null ? ' (HTTP $httpStatus)' : ''}';
+                '${httpStatus != null ? ' (HTTP $httpStatus)' : ''}'
+                '. Tu sesión sigue guardada: vuelve a intentarlo en un '
+                'momento.';
       status = AuthStatus.signedOut;
       notifyListeners();
     } on PlatformException catch (e) {
@@ -321,12 +393,41 @@ class AuthController extends ChangeNotifier {
       status = AuthStatus.signedOut;
       notifyListeners();
     } catch (e) {
+      // Sin red, DNS caído, certificado... nada de esto invalida el token:
+      // se conserva y se ofrece reintentar.
+      canRetrySavedSession = true;
       errorMessage =
           'No se pudo preparar tu espacio en GitHub. Comprueba tu conexión '
           'a internet y vuelve a intentarlo. (${e.runtimeType})';
       status = AuthStatus.signedOut;
       notifyListeners();
     }
+  }
+
+  /// Vuelve a intentar preparar el espacio con la sesión que ya está
+  /// guardada en el dispositivo, tras un fallo pasajero
+  /// ([canRetrySavedSession]). Evita repetir el device flow entero por una
+  /// incidencia de unos minutos en GitHub.
+  Future<void> retrySavedSession() async {
+    if (isDemoMode) {
+      await _completeSignIn(
+        GitHubConfig.demoPersonalAccessToken!,
+        persist: false,
+      );
+      return;
+    }
+
+    final token = await _storage.readToken();
+    if (token == null) {
+      canRetrySavedSession = false;
+      errorMessage =
+          'Ya no hay ninguna sesión guardada en este dispositivo. Conecta '
+          'tu cuenta de GitHub para continuar.';
+      status = AuthStatus.signedOut;
+      notifyListeners();
+      return;
+    }
+    await _completeSignIn(token, persist: false);
   }
 
   /// Confirma (o sustituye) el nombre sugerido en
@@ -397,6 +498,7 @@ class AuthController extends ChangeNotifier {
     if (isDemoMode) return;
 
     await _storage.clearToken();
+    canRetrySavedSession = false;
     currentUser = null;
     driveService = null;
     deviceCodeRequest = null;
