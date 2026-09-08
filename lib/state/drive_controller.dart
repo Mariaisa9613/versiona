@@ -92,6 +92,7 @@ class DriveController extends ChangeNotifier {
         await switchRepo(availableRepos.first);
       } else {
         entries = const [];
+        _entriesSource = null;
         error =
             'No te queda ningún repositorio. Crea uno nuevo para continuar.';
         loading = false;
@@ -110,25 +111,54 @@ class DriveController extends ChangeNotifier {
   String get currentPath => _pathSegments.join('/');
   bool get isAtRoot => _pathSegments.isEmpty;
 
+  /// De qué repositorio y carpeta es lo que hay ahora mismo en [entries].
+  ///
+  /// Conservar la lista cuando falla una recarga solo tiene sentido si es de
+  /// **este** sitio. Sin distinguirlo, entrar en una carpeta cuya lectura
+  /// fallaba dejaba en pantalla los ficheros de la carpeta anterior, sin
+  /// ningún aviso: parecían los de la carpeta recién abierta.
+  String? _entriesSource;
+
+  String get _currentSource => '${_service.repoName}:$currentPath';
+
   Future<void> load() async {
+    final source = _currentSource;
+    if (_entriesSource != source) {
+      // Sitio distinto: lo que hubiera ya no describe dónde estamos.
+      entries = const [];
+      _entriesSource = source;
+    }
     loading = true;
     error = null;
     notifyListeners();
 
+    List<DriveEntry>? loaded;
+    String? failure;
     try {
-      entries = await _service.listFolder(currentPath);
+      loaded = await _service.listFolder(currentPath);
     } catch (e) {
-      // Si ya había una lista válida (p. ej. recargando tras subir un
-      // fichero), la conservamos en vez de vaciarla: un fallo transitorio
-      // al releer no debería hacer desaparecer contenido que sí se guardó.
-      error = describeError(
+      failure = describeError(
         e,
         fallback: 'No se pudo cargar el contenido de esta carpeta.',
       );
-    } finally {
-      loading = false;
-      notifyListeners();
     }
+
+    // Se pudo cambiar de carpeta o de repositorio mientras se leía: lo que
+    // acaba de llegar ya no es de donde estamos, y hay otra carga en marcha
+    // que sí lo es.
+    if (_currentSource != source) return;
+
+    if (loaded != null) {
+      entries = loaded;
+    } else {
+      // Si ya había una lista válida de esta misma carpeta (p. ej.
+      // recargando tras subir un fichero), la conservamos en vez de
+      // vaciarla: un fallo transitorio al releer no debería hacer
+      // desaparecer contenido que sí se guardó.
+      error = failure;
+    }
+    loading = false;
+    notifyListeners();
   }
 
   Future<void> openFolder(DriveEntry entry) async {

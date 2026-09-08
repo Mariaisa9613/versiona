@@ -1198,8 +1198,8 @@ class _DriveBody extends StatelessWidget {
 
     // Solo tapamos la pantalla con el error de pantalla completa si además
     // no hay ninguna entrada que mostrar. Si la carga anterior sí trajo
-    // contenido válido, un fallo puntual al recargar (p. ej. justo tras
-    // subir un fichero) no debe hacerlo desaparecer de la vista.
+    // contenido válido de esta misma carpeta, un fallo puntual al recargar
+    // (p. ej. justo tras subir un fichero) no debe hacerlo desaparecer.
     if (drive.error != null && drive.entries.isEmpty) {
       return ListView(
         children: [
@@ -1210,7 +1210,23 @@ class _DriveBody extends StatelessWidget {
             color: Theme.of(context).colorScheme.error,
           ),
           const SizedBox(height: 12),
-          Center(child: Text(drive.error!)),
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(drive.error!, textAlign: TextAlign.center),
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Tirar hacia abajo para recargar no existe con ratón, así que sin
+          // este botón un fallo al abrir una carpeta dejaba la pantalla sin
+          // salida más que volver atrás.
+          Center(
+            child: FilledButton.icon(
+              onPressed: drive.load,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Reintentar'),
+            ),
+          ),
         ],
       );
     }
