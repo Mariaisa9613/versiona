@@ -79,29 +79,47 @@ class PendingChange {
     );
   }
 
-  /// Los cambios pendientes que se deducen de comparar la versión aprobada
-  /// con la rama de trabajo. [files] son los ficheros que difieren, con su
-  /// estado neto (da igual por cuántos commits hayan pasado).
+  /// Los cambios pendientes que salen de comparar los ficheros de la versión
+  /// aprobada con los de la rama de trabajo. Cada mapa va de ruta al sha de
+  /// su contenido, así que dos rutas con el mismo sha son el mismo fichero
+  /// byte a byte.
+  ///
+  /// Se comparan **los ficheros que hay ahora en cada rama**, no el
+  /// historial. La API de comparación de GitHub (`base...head`) mide contra
+  /// la *base de fusión* de las dos ramas, no contra la punta de la base; y
+  /// como aprobar no fusiona nada, esa base nunca avanza. Con ella, un
+  /// fichero ya aprobado seguía contando como pendiente para siempre
+  /// (llegando a bloquear el borrado de su carpeta), y la baja de un
+  /// fichero que se había aprobado no aparecía en absoluto.
   ///
   /// Un renombrado o un movimiento aparecen como dos cambios: el fichero
   /// nuevo en su sitio y la baja del anterior. Es lo que de verdad ha
   /// pasado, y así cada mitad se puede aprobar o rechazar por separado.
-  static List<PendingChange> fromComparison(List<CommitFile> files) {
+  static List<PendingChange> fromTrees({
+    required Map<String, String> approved,
+    required Map<String, String> working,
+  }) {
     final changes = <PendingChange>[];
-    for (final file in files) {
-      final path = file.name;
-      if (path == null) continue;
 
-      final PendingChangeKind kind;
-      switch (file.status) {
-        case 'added':
-          kind = PendingChangeKind.added;
-        case 'removed':
-          kind = PendingChangeKind.deleted;
-        default:
-          kind = PendingChangeKind.modified;
-      }
-      changes.add(PendingChange(path: path, kind: kind));
+    for (final entry in working.entries) {
+      final approvedSha = approved[entry.key];
+      if (approvedSha == entry.value) continue; // Idéntico: nada que revisar.
+      changes.add(
+        PendingChange(
+          path: entry.key,
+          kind:
+              approvedSha == null
+                  ? PendingChangeKind.added
+                  : PendingChangeKind.modified,
+        ),
+      );
+    }
+
+    // Lo que está aprobado y ya no está en la rama de trabajo es una baja
+    // pendiente de aprobarse.
+    for (final path in approved.keys) {
+      if (working.containsKey(path)) continue;
+      changes.add(PendingChange(path: path, kind: PendingChangeKind.deleted));
     }
 
     changes.sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));

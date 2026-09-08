@@ -1,0 +1,428 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:github/github.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:versiona/models/drive_entry.dart';
+import 'package:versiona/models/pending_change.dart';
+import 'package:versiona/services/drive_service.dart';
+
+/// Un repositorio de GitHub de mentira, con las dos ramas que usa Versiona y
+/// solo los endpoints que toca el servicio.
+///
+/// Guarda el contenido de cada fichero por rama y deriva el sha de ese
+/// contenido, que es lo que hace Git: dos ficheros con el mismo contenido
+/// tienen el mismo sha, y de ahí sale todo el estado de aprobación.
+class _FakeGitHub {
+  _FakeGitHub({
+    Map<String, String> validated = const {},
+    Map<String, String> working = const {},
+  }) : branches = {
+         'main': Map.of(validated),
+         'en-revision': Map.of(working),
+       };
+
+  /// rama -> (ruta -> contenido).
+  final Map<String, Map<String, String>> branches;
+
+  Map<String, String> get validated => branches['main']!;
+  Map<String, String> get working => branches['en-revision']!;
+
+  static String _sha(String content) => md5.convert(utf8.encode(content)).toString();
+
+  DriveService build() {
+    final github = GitHub(client: MockClient(_handle));
+    return DriveService(github);
+  }
+
+  http.Response _json(Object body, [int status = 200]) => http.Response(
+    jsonEncode(body),
+    status,
+    headers: const {'content-type': 'application/json'},
+  );
+
+  Map<String, dynamic> _fileJson(String path, String content) {
+    final name = path.contains('/') ? path.split('/').last : path;
+    return {
+      'name': name,
+      'path': path,
+      'sha': _sha(content),
+      'size': content.length,
+      'type': 'file',
+      'encoding': 'base64',
+      'content': base64Encode(utf8.encode(content)),
+    };
+  }
+
+  /// Lo que hay directamente dentro de [folder] en [branch]: los ficheros de
+  /// ese nivel y las carpetas que se deducen de las rutas más profundas.
+  List<Map<String, dynamic>> _dirJson(String folder, Map<String, String> tree) {
+    final prefix = folder.isEmpty ? '' : '$folder/';
+    final entries = <String, Map<String, dynamic>>{};
+
+    for (final path in tree.keys) {
+      if (!path.startsWith(prefix)) continue;
+      final rest = path.substring(prefix.length);
+      if (rest.isEmpty) continue;
+
+      if (rest.contains('/')) {
+        final name = rest.split('/').first;
+        entries['$prefix$name'] ??= {
+          'name': name,
+          'path': '$prefix$name',
+          'sha': 'tree-$prefix$name',
+          'type': 'dir',
+        };
+      } else {
+        entries[path] = _fileJson(path, tree[path]!);
+      }
+    }
+    return entries.values.toList();
+  }
+
+  Future<http.Response> _handle(http.Request request) async {
+    final path = request.url.path;
+    final query = request.url.queryParameters;
+
+    // Repositorio, para que switchTo pueda adoptarlo.
+    if (path == '/repos/o/r' && request.method == 'GET') {
+      return _json({
+        'name': 'r',
+        'full_name': 'o/r',
+        'default_branch': 'main',
+        'private': true,
+      });
+    }
+
+    // Punta de una rama. Una rama que no existe se responde sin "commit",
+    // que es como se comporta el paquete `github` ante un 404 aquí.
+    if (path.startsWith('/repos/o/r/branches/')) {
+      final branch = path.substring('/repos/o/r/branches/'.length);
+      if (!branches.containsKey(branch)) return _json(const {});
+      return _json({
+        'name': branch,
+        'commit': {'sha': 'tip-$branch'},
+      });
+    }
+
+    // Árbol completo de una rama.
+    if (path.startsWith('/repos/o/r/git/trees/')) {
+      final tip = path.substring('/repos/o/r/git/trees/'.length);
+      final tree = branches[tip.replaceFirst('tip-', '')] ?? const {};
+      return _json({
+        'sha': tip,
+        'truncated': false,
+        'tree': [
+          for (final entry in tree.entries)
+            {
+              'path': entry.key,
+              'type': 'blob',
+              'sha': _sha(entry.value),
+              'size': entry.value.length,
+            },
+        ],
+      });
+    }
+
+    // El historial no aporta nada a estos tests.
+    if (path == '/repos/o/r/commits') return _json(const []);
+
+    if (path.startsWith('/repos/o/r/contents/')) {
+      final target = Uri.decodeComponent(
+        path.substring('/repos/o/r/contents/'.length),
+      );
+      final body =
+          request.body.isEmpty
+              ? const <String, dynamic>{}
+              : jsonDecode(request.body) as Map<String, dynamic>;
+      final branch = query['ref'] ?? body['branch'] as String? ?? 'main';
+      final tree = branches[branch];
+      if (tree == null) return _json({'message': 'Branch not found'}, 404);
+
+      switch (request.method) {
+        case 'GET':
+          final content = tree[target];
+          if (content != null) return _json(_fileJson(target, content));
+          final children = _dirJson(target, tree);
+          // La raíz de una rama siempre existe, aunque esté vacía: GitHub
+          // responde con una lista vacía, no con un 404.
+          if (children.isNotEmpty || target.isEmpty) return _json(children);
+          return _json({'message': 'Not Found'}, 404);
+
+        case 'PUT':
+          final content = utf8.decode(
+            base64Decode(body['content'] as String),
+          );
+          tree[target] = content;
+          return _json({'content': _fileJson(target, content)});
+
+        case 'DELETE':
+          tree.remove(target);
+          return _json({'content': null});
+      }
+    }
+
+    return _json({'message': 'Sin ruta para ${request.method} $path'}, 404);
+  }
+}
+
+Future<DriveService> _driveOn(_FakeGitHub github) async {
+  final service = github.build();
+  await service.switchTo(RepositorySlug('o', 'r'));
+  return service;
+}
+
+void main() {
+  group('Qué está pendiente de aprobación', () {
+    test('un fichero ya aprobado deja de estar pendiente', () async {
+      // Aprobar copia el fichero a la rama aprobada sin fusionar nada. La
+      // comparación de GitHub (base...head) mide contra la base de fusión,
+      // que nunca avanza, y por eso lo seguía dando por pendiente para
+      // siempre: llegaba a bloquear el borrado de su carpeta sin salida.
+      final github = _FakeGitHub(
+        validated: {'factura.pdf': 'contenido aprobado'},
+        working: {'factura.pdf': 'contenido aprobado'},
+      );
+      final drive = await _driveOn(github);
+
+      expect(await drive.pendingChanges(), isEmpty);
+    });
+
+    test('un fichero modificado sin aprobar sí está pendiente', () async {
+      final github = _FakeGitHub(
+        validated: {'factura.pdf': 'v1'},
+        working: {'factura.pdf': 'v2'},
+      );
+      final drive = await _driveOn(github);
+
+      final pending = await drive.pendingChanges();
+      expect(pending.single.path, 'factura.pdf');
+      expect(pending.single.kind, PendingChangeKind.modified);
+    });
+
+    test('borrar un fichero ya aprobado sale como baja pendiente', () async {
+      // Este era el peor: el fichero había llegado a la rama aprobada por una
+      // aprobación, así que no estaba en la base de fusión y su borrado no
+      // aparecía en la comparación. En pantalla volvía a salir "Validado",
+      // sin ninguna baja que aprobar.
+      final github = _FakeGitHub(
+        validated: {'factura.pdf': 'contenido'},
+        working: const {},
+      );
+      final drive = await _driveOn(github);
+
+      final pending = await drive.pendingChanges();
+      expect(pending.single.path, 'factura.pdf');
+      expect(pending.single.kind, PendingChangeKind.deleted);
+
+      final entry = (await drive.listFolder('')).single;
+      expect(entry.name, 'factura.pdf');
+      expect(entry.status, ReviewStatus.inReview);
+      expect(entry.pendingChange!.kind, PendingChangeKind.deleted);
+    });
+
+    test('el fichero interno de las carpetas no cuenta como cambio', () async {
+      final github = _FakeGitHub(
+        validated: const {},
+        working: {'Facturas/.versiona-keep': 'marcador'},
+      );
+      final drive = await _driveOn(github);
+
+      expect(await drive.pendingChanges(), isEmpty);
+    });
+  });
+
+  group('Carpetas con todo aprobado', () {
+    test('se pueden borrar: no quedan cambios pendientes dentro', () async {
+      final github = _FakeGitHub(
+        validated: {'Facturas/enero.pdf': 'igual', 'Facturas/febrero.pdf': 'igual'},
+        working: {'Facturas/enero.pdf': 'igual', 'Facturas/febrero.pdf': 'igual'},
+      );
+      final drive = await _driveOn(github);
+
+      final folder = DriveEntry(
+        name: 'Facturas',
+        path: 'Facturas',
+        type: DriveEntryType.folder,
+      );
+
+      // Antes esto lanzaba "esta carpeta tiene 2 cambios pendientes dentro",
+      // aunque estuvieran los dos aprobados, y no había forma de resolverlo.
+      final result = await drive.deleteEntry(folder);
+
+      expect(github.working, isEmpty);
+      expect(result, isNotNull);
+      expect(result!.pendingChange!.kind, PendingChangeKind.deleted);
+    });
+
+    test('con algo sin aprobar dentro, sigue sin poder borrarse', () async {
+      final github = _FakeGitHub(
+        validated: {'Facturas/enero.pdf': 'v1'},
+        working: {'Facturas/enero.pdf': 'v2'},
+      );
+      final drive = await _driveOn(github);
+
+      await expectLater(
+        drive.deleteEntry(
+          DriveEntry(
+            name: 'Facturas',
+            path: 'Facturas',
+            type: DriveEntryType.folder,
+          ),
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            contains('cambio pendiente'),
+          ),
+        ),
+      );
+    });
+  });
+
+  group('Aprobar y rechazar una carpeta', () {
+    test('aprobar su baja borra de verdad los ficheros de dentro', () async {
+      // La carpeta se borró de la rama de trabajo y está pendiente de que se
+      // apruebe la baja. Antes, aprobarla no escribía nada (una ruta de
+      // carpeta no es ningún fichero) y aun así decía que había ido bien: la
+      // carpeta desaparecía de la vista y reaparecía al recargar.
+      final github = _FakeGitHub(
+        validated: {'Facturas/enero.pdf': 'a', 'Facturas/febrero.pdf': 'b'},
+        working: const {},
+      );
+      final drive = await _driveOn(github);
+
+      final results = await drive.approveChanges([
+        const PendingChange(path: 'Facturas', kind: PendingChangeKind.deleted),
+      ]);
+
+      expect(results, hasLength(2));
+      expect(results.every((r) => r.ok), isTrue);
+      expect(results.map((r) => r.change.path), containsAll(<String>[
+        'Facturas/enero.pdf',
+        'Facturas/febrero.pdf',
+      ]));
+      expect(github.validated, isEmpty);
+    });
+
+    test('rechazar su baja devuelve los ficheros a la rama de trabajo',
+        () async {
+      final github = _FakeGitHub(
+        validated: {'Facturas/enero.pdf': 'a', 'Facturas/febrero.pdf': 'b'},
+        working: const {},
+      );
+      final drive = await _driveOn(github);
+
+      final results = await drive.rejectChanges([
+        const PendingChange(path: 'Facturas', kind: PendingChangeKind.deleted),
+      ]);
+
+      expect(results.every((r) => r.ok), isTrue);
+      expect(github.working, {
+        'Facturas/enero.pdf': 'a',
+        'Facturas/febrero.pdf': 'b',
+      });
+      expect(github.validated, hasLength(2));
+    });
+
+    test('aprobar una carpeta nueva la lleva entera a la versión aprobada',
+        () async {
+      final github = _FakeGitHub(
+        validated: const {},
+        working: {'Facturas/enero.pdf': 'a', 'Facturas/febrero.pdf': 'b'},
+      );
+      final drive = await _driveOn(github);
+
+      final results = await drive.approveChanges([
+        const PendingChange(path: 'Facturas', kind: PendingChangeKind.added),
+      ]);
+
+      expect(results.every((r) => r.ok), isTrue);
+      expect(github.validated, {
+        'Facturas/enero.pdf': 'a',
+        'Facturas/febrero.pdf': 'b',
+      });
+      expect(await drive.pendingChanges(forceRefresh: true), isEmpty);
+    });
+
+    test('una carpeta que no resuelve a ningún fichero se reporta, no se da '
+        'por buena', () async {
+      final github = _FakeGitHub(
+        validated: {'Facturas/enero.pdf': 'a'},
+        working: {'Facturas/enero.pdf': 'a'},
+      );
+      final drive = await _driveOn(github);
+
+      // No hay nada pendiente dentro, así que no hay nada que expandir y la
+      // ruta llega tal cual: es una carpeta, y decirlo es mejor que informar
+      // de un éxito que no ha ocurrido.
+      final results = await drive.approveChanges([
+        const PendingChange(path: 'Facturas', kind: PendingChangeKind.deleted),
+      ]);
+
+      expect(results.single.ok, isFalse);
+      // Con el nombre dentro: el mensaje va tal cual a la interfaz.
+      expect(results.single.error, '"Facturas" es una carpeta, no un fichero: '
+          'aprueba o rechaza lo que tiene dentro.');
+      expect(github.validated, hasLength(1));
+    });
+  });
+
+  group('Aprobar y rechazar un fichero', () {
+    test('aprobar una modificación la lleva a la versión aprobada', () async {
+      final github = _FakeGitHub(
+        validated: {'factura.pdf': 'v1'},
+        working: {'factura.pdf': 'v2'},
+      );
+      final drive = await _driveOn(github);
+
+      final results = await drive.approveChanges([
+        const PendingChange(
+          path: 'factura.pdf',
+          kind: PendingChangeKind.modified,
+        ),
+      ]);
+
+      expect(results.single.ok, isTrue);
+      expect(github.validated['factura.pdf'], 'v2');
+      expect(await drive.pendingChanges(forceRefresh: true), isEmpty);
+    });
+
+    test('rechazar una modificación la devuelve a como estaba', () async {
+      final github = _FakeGitHub(
+        validated: {'factura.pdf': 'v1'},
+        working: {'factura.pdf': 'v2'},
+      );
+      final drive = await _driveOn(github);
+
+      final results = await drive.rejectChanges([
+        const PendingChange(
+          path: 'factura.pdf',
+          kind: PendingChangeKind.modified,
+        ),
+      ]);
+
+      expect(results.single.ok, isTrue);
+      expect(github.working['factura.pdf'], 'v1');
+      expect(await drive.pendingChanges(forceRefresh: true), isEmpty);
+    });
+
+    test('rechazar algo que nunca se aprobó lo quita del todo', () async {
+      final github = _FakeGitHub(
+        validated: const {},
+        working: {'borrador.pdf': 'x'},
+      );
+      final drive = await _driveOn(github);
+
+      final results = await drive.rejectChanges([
+        const PendingChange(path: 'borrador.pdf', kind: PendingChangeKind.added),
+      ]);
+
+      expect(results.single.ok, isTrue);
+      expect(github.working, isEmpty);
+    });
+  });
+}
