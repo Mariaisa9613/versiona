@@ -95,6 +95,19 @@ class DriveService {
   /// lo que identifica de verdad a un repositorio.
   String? get repoFullName => _slug?.fullName;
 
+  /// Tamaño máximo de un fichero que se puede subir. La API de "contents"
+  /// de GitHub rechaza lo que pasa de 100 MB, pero va mal mucho antes: el
+  /// fichero viaja entero en base64 (un tercio más grande) en una sola
+  /// petición, y en web el navegador tiene las dos copias en memoria a la
+  /// vez.
+  static const int maxUploadBytes = 25 * 1024 * 1024;
+
+  /// Por qué no se puede subir [fileName], para decirlo igual desde el
+  /// formulario de subida que desde aquí.
+  static String tooLargeMessage(String fileName) =>
+      '"$fileName" ocupa más de ${maxUploadBytes ~/ (1024 * 1024)} MB, que '
+      'es lo máximo que se puede subir.';
+
   /// Busca el repositorio de datos del usuario y lo crea si es la primera
   /// vez que conecta su cuenta. También garantiza que exista la rama de
   /// trabajo.
@@ -564,6 +577,9 @@ class DriveService {
     required List<int> bytes,
     String? commitMessage,
   }) async {
+    if (bytes.length > maxUploadBytes) {
+      throw StateError(tooLargeMessage(fileName));
+    }
     final path = _joinPath(folderPath, fileName);
     final content = base64Encode(bytes);
 

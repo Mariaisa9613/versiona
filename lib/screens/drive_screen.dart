@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/drive_entry.dart';
+import '../services/drive_service.dart';
 import '../services/ticket_capture_service.dart';
 import '../services/ticket_ocr_service.dart';
 import '../state/auth_controller.dart';
@@ -950,6 +951,10 @@ class _UploadSheetState extends State<_UploadSheet> {
   PlatformFile? _file;
   bool _picking = false;
 
+  /// Por qué no se ha podido usar el último archivo elegido. Se enseña aquí
+  /// mismo: un SnackBar quedaría tapado por este mismo panel.
+  String? _error;
+
   /// Último mensaje generado automáticamente, para saber si el usuario lo
   /// ha dejado tal cual (y así poder actualizarlo si cambia de fichero) o
   /// si lo ha editado a mano (y entonces no tocarlo).
@@ -975,17 +980,24 @@ class _UploadSheetState extends State<_UploadSheet> {
         // El usuario cerró el selector sin elegir nada: no es un error.
         return;
       }
+      // Se comprueba ya, al elegirlo: si no, la subida fallaría a mitad y sin
+      // decir por qué.
+      if (picked.size > DriveService.maxUploadBytes) {
+        if (mounted) {
+          setState(() => _error = DriveService.tooLargeMessage(picked.name));
+        }
+        return;
+      }
       if (picked.bytes == null) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No se pudo leer el contenido de ese archivo.'),
-            ),
+          setState(
+            () => _error = 'No se pudo leer el contenido de ese archivo.',
           );
         }
         return;
       }
       setState(() {
+        _error = null;
         _file = picked;
         // Solo autorrellena si el usuario no ha escrito nada propio: si ya
         // hay texto que no es el mensaje automático anterior, se respeta.
@@ -1047,6 +1059,13 @@ class _UploadSheetState extends State<_UploadSheet> {
               _file == null ? 'Seleccionar archivo' : 'Cambiar archivo',
             ),
           ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ],
           if (_file != null) ...[
             const SizedBox(height: 12),
             Container(

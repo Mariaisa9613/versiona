@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -535,6 +536,26 @@ void main() {
       await drive.move(entry: file('a.pdf'), destinationFolderPath: 'Destino');
 
       expect(github.working, {'Destino/a.pdf': 'mío'});
+    });
+  });
+
+  group('Subir', () {
+    test('un fichero demasiado grande se rechaza antes de enviar nada',
+        () async {
+      final github = _FakeGitHub();
+      final drive = await _driveOn(github);
+
+      await expectLater(
+        drive.uploadFile(
+          folderPath: '',
+          fileName: 'enorme.zip',
+          bytes: Uint8List(DriveService.maxUploadBytes + 1),
+        ),
+        throwsA(
+          isA<StateError>().having((e) => e.message, 'message', contains('25 MB')),
+        ),
+      );
+      expect(github.requests.where((r) => r.startsWith('PUT ')), isEmpty);
     });
   });
 }
