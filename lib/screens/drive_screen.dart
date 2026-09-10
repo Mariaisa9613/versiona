@@ -16,6 +16,7 @@ import '../utils/error_messages.dart';
 import '../utils/repo_naming.dart';
 import '../widgets/file_preview_dialog.dart';
 import '../widgets/review_status_badge.dart';
+import '../widgets/text_prompt_dialog.dart';
 import 'folder_picker_screen.dart';
 import 'version_history_screen.dart';
 
@@ -213,30 +214,13 @@ class _DriveView extends StatelessWidget {
   Future<void> _createFolder(BuildContext context) async {
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
-    final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
       builder:
-          (context) => AlertDialog(
-            title: const Text('Nueva carpeta'),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'Nombre de la carpeta',
-              ),
-              onSubmitted: (v) => Navigator.of(context).pop(v),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Cancelar'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(controller.text),
-                child: const Text('Crear'),
-              ),
-            ],
+          (context) => const TextPromptDialog(
+            title: 'Nueva carpeta',
+            hintText: 'Nombre de la carpeta',
+            confirmLabel: 'Crear',
           ),
     );
 
@@ -257,27 +241,13 @@ class _DriveView extends StatelessWidget {
   Future<void> _renameEntry(BuildContext context, DriveEntry entry) async {
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
-    final controller = TextEditingController(text: entry.name);
     final newName = await showDialog<String>(
       context: context,
       builder:
-          (context) => AlertDialog(
-            title: const Text('Renombrar'),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              onSubmitted: (v) => Navigator.of(context).pop(v),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Cancelar'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(controller.text),
-                child: const Text('Renombrar'),
-              ),
-            ],
+          (context) => TextPromptDialog(
+            title: 'Renombrar',
+            initialText: entry.name,
+            confirmLabel: 'Renombrar',
           ),
     );
 
@@ -704,47 +674,14 @@ class _ManageReposDialog extends StatelessWidget {
   }
 
   Future<void> _create(BuildContext context) async {
-    final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
       builder:
-          (context) => StatefulBuilder(
-            builder: (context, setState) {
-              final preview = _resolveRepoName(controller.text);
-              return AlertDialog(
-                title: const Text('Nombre del proyecto'),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    TextField(
-                      controller: controller,
-                      autofocus: true,
-                      onChanged: (_) => setState(() {}),
-                      decoration: const InputDecoration(
-                        hintText: 'p. ej. Tesorería',
-                      ),
-                      onSubmitted: (v) => Navigator.of(context).pop(v),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Se creará como "$preview".',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancelar'),
-                  ),
-                  FilledButton(
-                    onPressed: () => Navigator.of(context).pop(controller.text),
-                    child: const Text('Crear'),
-                  ),
-                ],
-              );
-            },
+          (context) => TextPromptDialog(
+            title: 'Nombre del proyecto',
+            hintText: 'p. ej. Tesorería',
+            helperFor: (text) => 'Se creará como "${_resolveRepoName(text)}".',
+            confirmLabel: 'Crear',
           ),
     );
 
@@ -767,58 +704,23 @@ class _ManageReposDialog extends StatelessWidget {
   }
 
   Future<void> _confirmDelete(BuildContext context, Repository repo) async {
-    final nameController = TextEditingController();
-    final confirmed = await showDialog<bool>(
+    final typed = await showDialog<String>(
       context: context,
       builder:
-          (context) => StatefulBuilder(
-            builder: (context, setState) {
-              final matches = nameController.text.trim() == repo.name;
-              return AlertDialog(
-                title: Text('Eliminar "${repo.name}"'),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Esto borra el repositorio de GitHub para siempre: '
-                      'todos los ficheros y su historial de versiones se '
-                      'perderán. No se puede deshacer.',
-                    ),
-                    const SizedBox(height: 16),
-                    Text('Escribe "${repo.name}" para confirmar:'),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: nameController,
-                      autofocus: true,
-                      onChanged: (_) => setState(() {}),
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                  ],
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('Cancelar'),
-                  ),
-                  FilledButton(
-                    onPressed:
-                        matches ? () => Navigator.of(context).pop(true) : null,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Theme.of(context).colorScheme.error,
-                      foregroundColor: Theme.of(context).colorScheme.onError,
-                    ),
-                    child: const Text('Eliminar definitivamente'),
-                  ),
-                ],
-              );
-            },
+          (context) => TextPromptDialog(
+            title: 'Eliminar "${repo.name}"',
+            message:
+                'Esto borra el repositorio de GitHub para siempre: todos los '
+                'ficheros y su historial de versiones se perderán. No se '
+                'puede deshacer.\n\nEscribe "${repo.name}" para confirmar:',
+            outlined: true,
+            canConfirm: (text) => text.trim() == repo.name,
+            destructive: true,
+            confirmLabel: 'Eliminar definitivamente',
           ),
     );
 
-    if (confirmed != true) return;
+    if (typed == null) return;
     if (!context.mounted) return;
 
     final messenger = ScaffoldMessenger.of(context);
