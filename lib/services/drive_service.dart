@@ -695,6 +695,23 @@ class DriveService {
     }
   }
 
+  /// Si hay algo (fichero o carpeta) en [path] dentro de [ref].
+  ///
+  /// A diferencia de [_fileAt], un fallo que no sea "no existe" se propaga:
+  /// quien pregunta esto va a escribir ahí, y dar por libre una ruta que no
+  /// se ha podido comprobar es justo lo que se quiere evitar.
+  Future<bool> _existsAt(String path, String ref) async {
+    try {
+      await _github.repositories.getContents(slug, path, ref: ref);
+      return true;
+    } on GitHubError catch (e) {
+      // getContents() no conserva el código HTTP: un 404 llega como un
+      // GitHubError con el mensaje de la API.
+      if (e is NotFound || e.message == 'Not Found') return false;
+      rethrow;
+    }
+  }
+
   /// Crea una carpeta vacía mediante un fichero "placeholder" invisible para
   /// el usuario (Git no versiona carpetas vacías).
   Future<DriveEntry> createFolder({
@@ -914,6 +931,14 @@ class DriveService {
   }) async {
     if (newPath == entry.path) return entry;
     if (entry.isFolder) await _assertNoPendingInside(entry.path);
+
+    // Antes de tocar nada: GitHub no deja crear un fichero donde ya hay otro,
+    // así que con el destino ocupado la copia fallaba a mitad, con parte de
+    // los ficheros ya duplicados y ninguno de los originales borrado.
+    if (await _existsAt(newPath, _workBranch)) {
+      final name = newPath.substring(newPath.lastIndexOf('/') + 1);
+      throw StateError('Ya existe "$name" en esa carpeta.');
+    }
 
     final files =
         entry.isFolder

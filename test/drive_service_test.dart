@@ -82,7 +82,40 @@ class _FakeGitHub {
     return entries.values.toList();
   }
 
+  /// Peticiones recibidas, como "MÉTODO ruta".
+  final List<String> requests = [];
+
+  /// Cuántas peticiones ha llegado a haber en vuelo a la vez.
+  int maxInFlight = 0;
+  int _inFlight = 0;
+
+  /// Si devuelve `true` para una petición, se contesta con el 403 del límite
+  /// secundario de GitHub.
+  bool Function(http.Request request)? rateLimited;
+
   Future<http.Response> _handle(http.Request request) async {
+    requests.add('${request.method} ${request.url.path}');
+    if (rateLimited?.call(request) ?? false) {
+      return _json({
+        'message':
+            'You have exceeded a secondary rate limit. Please wait a few '
+            'minutes before you try again.',
+      }, 403);
+    }
+
+    _inFlight++;
+    if (_inFlight > maxInFlight) maxInFlight = _inFlight;
+    try {
+      // Un respiro para que las peticiones lanzadas a la vez coincidan en
+      // vuelo, como pasaría contra GitHub de verdad.
+      await Future<void>.delayed(Duration.zero);
+      return await _route(request);
+    } finally {
+      _inFlight--;
+    }
+  }
+
+  Future<http.Response> _route(http.Request request) async {
     final path = request.url.path;
     final query = request.url.queryParameters;
 
@@ -423,6 +456,85 @@ void main() {
 
       expect(results.single.ok, isTrue);
       expect(github.working, isEmpty);
+    });
+  });
+
+  group('Mover y renombrar', () {
+    DriveEntry file(String path) => DriveEntry(
+      name: path.split('/').last,
+      path: path,
+      type: DriveEntryType.file,
+    );
+
+    final folder = DriveEntry(
+      name: 'F',
+      path: 'F',
+      type: DriveEntryType.folder,
+    );
+
+    Iterable<String> writes(_FakeGitHub github) => github.requests.where(
+      (r) => r.startsWith('PUT ') || r.startsWith('DELETE '),
+    );
+
+    test('sobre un fichero con el mismo nombre se para antes de tocar nada',
+        () async {
+      // Antes se intentaba crear la copia sin sha, GitHub la rechazaba, y
+      // con una carpeta quedaba parte duplicada y nada borrado.
+      final files = {'a.pdf': 'mío', 'Destino/a.pdf': 'otro'};
+      final github = _FakeGitHub(validated: files, working: files);
+      final drive = await _driveOn(github);
+
+      await expectLater(
+        drive.move(entry: file('a.pdf'), destinationFolderPath: 'Destino'),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            'Ya existe "a.pdf" en esa carpeta.',
+          ),
+        ),
+      );
+      expect(github.working, files);
+      expect(writes(github), isEmpty);
+    });
+
+    test('renombrar a un nombre en uso tampoco pisa nada', () async {
+      final files = {'a.pdf': 'uno', 'b.pdf': 'dos'};
+      final github = _FakeGitHub(validated: files, working: files);
+      final drive = await _driveOn(github);
+
+      await expectLater(
+        drive.rename(entry: file('a.pdf'), newName: 'b.pdf'),
+        throwsA(isA<StateError>()),
+      );
+      expect(github.working, files);
+      expect(writes(github), isEmpty);
+    });
+
+    test('una carpeta sobre otra con el mismo nombre, igual', () async {
+      final files = {
+        'F/uno.pdf': '1',
+        'F/dos.pdf': '2',
+        'Destino/F/tres.pdf': '3',
+      };
+      final github = _FakeGitHub(validated: files, working: files);
+      final drive = await _driveOn(github);
+
+      await expectLater(
+        drive.move(entry: folder, destinationFolderPath: 'Destino'),
+        throwsA(isA<StateError>()),
+      );
+      expect(github.working, files);
+      expect(writes(github), isEmpty);
+    });
+
+    test('con el destino libre, se mueve', () async {
+      final github = _FakeGitHub(working: {'a.pdf': 'mío'});
+      final drive = await _driveOn(github);
+
+      await drive.move(entry: file('a.pdf'), destinationFolderPath: 'Destino');
+
+      expect(github.working, {'Destino/a.pdf': 'mío'});
     });
   });
 }
