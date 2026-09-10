@@ -87,6 +87,19 @@ class AuthController extends ChangeNotifier {
   String? _pendingToken;
   bool _pendingPersist = false;
 
+  /// Aviso para enseñar una sola vez al entrar, cuando el inicio de sesión
+  /// ha ido bien pero algo secundario no (p.ej. el llavero no ha podido
+  /// guardar la sesión). Se consume con [takeSignInNotice].
+  String? _signInNotice;
+
+  /// Devuelve el aviso pendiente, si lo hay, y lo borra para que no se
+  /// vuelva a enseñar.
+  String? takeSignInNotice() {
+    final notice = _signInNotice;
+    _signInNotice = null;
+    return notice;
+  }
+
   /// En modo demo todo el mundo entra con el mismo token compartido, sin
   /// pantalla de login. Ver [GitHubConfig.demoPersonalAccessToken].
   bool get isDemoMode => GitHubConfig.isDemoMode;
@@ -336,9 +349,7 @@ class AuthController extends ChangeNotifier {
         // Esta cuenta ya tiene un espacio de Versiona (creado antes, quizá
         // desde otro dispositivo): lo reanudamos sin volver a preguntar.
         await drive.switchTo(RepositorySlug.full(existingWorkspace.fullName));
-        if (persist) {
-          await _storage.saveToken(token);
-        }
+        if (persist) await _rememberSession(token);
         currentUser = user;
         driveService = drive;
         status = AuthStatus.signedIn;
@@ -384,12 +395,6 @@ class AuthController extends ChangeNotifier {
                 '${httpStatus != null ? ' (HTTP $httpStatus)' : ''}'
                 '. Tu sesión sigue guardada: vuelve a intentarlo en un '
                 'momento.';
-      status = AuthStatus.signedOut;
-      notifyListeners();
-    } on PlatformException catch (e) {
-      errorMessage =
-          'No se pudo guardar la sesión de forma segura en este '
-          'dispositivo: ${e.message ?? e.code}';
       status = AuthStatus.signedOut;
       notifyListeners();
     } catch (e) {
@@ -451,9 +456,7 @@ class AuthController extends ChangeNotifier {
     try {
       await drive.createRepo(name);
 
-      if (_pendingPersist) {
-        await _storage.saveToken(token);
-      }
+      if (_pendingPersist) await _rememberSession(token);
 
       currentUser = user;
       driveService = drive;
@@ -474,6 +477,27 @@ class AuthController extends ChangeNotifier {
       status = AuthStatus.choosingWorkspaceName;
     }
     notifyListeners();
+  }
+
+  /// Guarda el token en el llavero del dispositivo.
+  ///
+  /// Un fallo aquí no se propaga: el inicio de sesión ya ha ido bien, y
+  /// tratarlo como un error dejaba al usuario fuera. Peor aún justo después
+  /// de crear el espacio, porque volvía a pedirle el nombre y reintentar
+  /// chocaba con el repositorio que ya se había creado. Lo único que se
+  /// pierde es que la próxima vez habrá que volver a conectar la cuenta, y
+  /// eso se avisa.
+  Future<void> _rememberSession(String token) async {
+    try {
+      await _storage.saveToken(token);
+    } catch (e) {
+      final reason = e is PlatformException ? e.message ?? e.code : '$e';
+      debugPrint('[Versiona] No se pudo guardar la sesión: $reason');
+      _signInNotice =
+          'Has entrado, pero este dispositivo no ha podido guardar la sesión '
+          'de forma segura ($reason): la próxima vez tendrás que volver a '
+          'conectar tu cuenta.';
+    }
   }
 
   /// Cancela la elección de nombre de espacio (p.ej. el usuario cierra el

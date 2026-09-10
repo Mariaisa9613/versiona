@@ -29,6 +29,16 @@ class DriveScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final notice = context.read<AuthController>().takeSignInNotice();
+    if (notice != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(notice), duration: const Duration(seconds: 8)),
+        );
+      });
+    }
+
     return ChangeNotifierProvider(
       create:
           (context) =>

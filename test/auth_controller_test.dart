@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -26,6 +28,54 @@ class _FakeStorage extends SecureStorageService {
     clearCount++;
     token = null;
   }
+}
+
+/// Un llavero que no deja guardar nada, como el de iOS con el dispositivo
+/// bloqueado o el de macOS sin permisos.
+class _BrokenKeychain extends _FakeStorage {
+  @override
+  Future<void> saveToken(String value) async => throw PlatformException(
+    code: 'keychain',
+    message: 'errSecInteractionNotAllowed',
+  );
+}
+
+/// GitHub para una cuenta que entra por primera vez: todavía sin ningún
+/// espacio de Versiona, y que acepta crear uno.
+http.Client _githubForFirstWorkspace() {
+  var workBranchExists = false;
+  http.Response json(Object body, [int status = 200]) => http.Response(
+    jsonEncode(body),
+    status,
+    headers: const {'content-type': 'application/json'},
+  );
+  const tip = {'sha': 'abc'};
+
+  return MockClient((request) async {
+    switch ((request.method, request.url.path)) {
+      case ('GET', '/user'):
+        return json({'login': 'maria', 'id': 1});
+      case ('GET', '/user/repos'):
+        return json(const []);
+      case ('POST', '/user/repos'):
+        return json({
+          'name': 'espacio',
+          'full_name': 'maria/espacio',
+          'default_branch': 'main',
+          'private': true,
+        }, 201);
+      case ('GET', '/repos/maria/espacio/branches/main'):
+        return json({'name': 'main', 'commit': tip});
+      case ('GET', '/repos/maria/espacio/branches/en-revision'):
+        return json(
+          workBranchExists ? {'name': 'en-revision', 'commit': tip} : const {},
+        );
+      case ('POST', '/repos/maria/espacio/git/refs'):
+        workBranchExists = true;
+        return json({'ref': 'refs/heads/en-revision', 'object': tip}, 201);
+    }
+    return json({'message': 'Not Found'}, 404);
+  });
 }
 
 /// Responde a la API de GitHub con el código que se le diga. Solo hace falta
@@ -266,6 +316,42 @@ void main() {
       expect(deviceAuth.calls, 2);
 
       auth.cancelSignIn();
+    });
+  });
+
+  group('El llavero no deja guardar la sesión', () {
+    testWidgets('tras crear el espacio se entra igual, avisando', (
+      tester,
+    ) async {
+      final storage = _BrokenKeychain();
+      final auth = AuthController(
+        storage: storage,
+        deviceAuth: _ScriptedDeviceAuth([
+          DevicePollResult.success('token-nuevo'),
+        ]),
+        httpClient: _githubForFirstWorkspace(),
+      );
+      addTearDown(auth.dispose);
+
+      unawaited(auth.startSignIn());
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 5));
+      for (var i = 0; i < 20; i++) {
+        if (auth.status == AuthStatus.choosingWorkspaceName) break;
+        await tester.pump();
+      }
+      expect(auth.status, AuthStatus.choosingWorkspaceName);
+
+      await auth.confirmWorkspaceName('espacio');
+
+      // Antes el fallo del llavero devolvía a elegir nombre, con el
+      // repositorio ya creado: reintentar chocaba con "name already exists"
+      // y no había forma de salir de ahí.
+      expect(auth.status, AuthStatus.signedIn);
+      expect(auth.driveService?.repoFullName, 'maria/espacio');
+      expect(storage.token, isNull);
+      expect(auth.takeSignInNotice(), contains('no ha podido guardar'));
+      expect(auth.takeSignInNotice(), isNull, reason: 'se avisa una sola vez');
     });
   });
 
