@@ -46,7 +46,7 @@ class DriveController extends ChangeNotifier {
 
   /// Cambia el Drive activo a [repo] y recarga el tablero desde su raíz.
   Future<void> switchRepo(Repository repo) async {
-    if (_service.repoName == repo.name) return;
+    if (_service.repoFullName == repo.fullName) return;
     loading = true;
     error = null;
     notifyListeners();
@@ -87,7 +87,7 @@ class DriveController extends ChangeNotifier {
     availableRepos =
         availableRepos.where((r) => r.fullName != repo.fullName).toList();
 
-    if (_service.repoName == repo.name) {
+    if (_service.repoFullName == repo.fullName) {
       if (availableRepos.isNotEmpty) {
         await switchRepo(availableRepos.first);
       } else {

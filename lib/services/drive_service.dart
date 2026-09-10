@@ -91,6 +91,10 @@ class DriveService {
   /// arriesgarse a lanzar una excepción.
   String? get repoName => _slug?.name;
 
+  /// Igual que [repoName], con el propietario delante ("usuario/repo"): es
+  /// lo que identifica de verdad a un repositorio.
+  String? get repoFullName => _slug?.fullName;
+
   /// Busca el repositorio de datos del usuario y lo crea si es la primera
   /// vez que conecta su cuenta. También garantiza que exista la rama de
   /// trabajo.
