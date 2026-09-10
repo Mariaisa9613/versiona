@@ -837,9 +837,14 @@ class DriveService {
 
   /// Contenido en bruto de [path] para poder previsualizarlo (imagen, PDF,
   /// hoja de cálculo...) sin necesidad de descargarlo primero.
-  Future<Uint8List> fetchFileBytes(String path) async {
+  ///
+  /// Con [approved] se lee de la versión aprobada: es lo que toca con un
+  /// fichero pendiente de eliminarse, que ya no está en la rama de trabajo
+  /// pero es justo cuando quien revisa necesita verlo para decidir.
+  Future<Uint8List> fetchFileBytes(String path, {bool approved = false}) async {
+    final ref = approved ? _validatedBranch : _workBranch;
     final contents = await _withRetry(
-      () => _github.repositories.getContents(slug, path, ref: _workBranch),
+      () => _github.repositories.getContents(slug, path, ref: ref),
     );
     final file = contents.file;
     if (file == null) {
@@ -891,8 +896,10 @@ class DriveService {
   }
 
   /// Enlace a la vista de GitHub para inspeccionar un fichero en detalle.
-  String webUrlFor(String path) =>
-      'https://github.com/${slug.fullName}/blob/$_workBranch/$path';
+  /// [approved] como en [fetchFileBytes].
+  String webUrlFor(String path, {bool approved = false}) =>
+      'https://github.com/${slug.fullName}/blob/'
+      '${approved ? _validatedBranch : _workBranch}/$path';
 
   /// Cambia el nombre de [entry] manteniéndolo en la misma carpeta.
   Future<DriveEntry> rename({

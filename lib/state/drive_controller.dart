@@ -282,13 +282,19 @@ class DriveController extends ChangeNotifier {
     notifyListeners();
   }
 
-  String webUrlFor(DriveEntry entry) => _service.webUrlFor(entry.path);
+  /// Un fichero pendiente de eliminarse ya no está en la rama de trabajo:
+  /// para verlo hay que ir a la versión aprobada.
+  bool _onlyInApproved(DriveEntry entry) =>
+      entry.pendingChange?.kind == PendingChangeKind.deleted;
+
+  String webUrlFor(DriveEntry entry) =>
+      _service.webUrlFor(entry.path, approved: _onlyInApproved(entry));
 
   Future<List<FileVersion>> fileHistory(DriveEntry entry) =>
       _service.fileHistory(entry.path);
 
   Future<Uint8List> fetchFileBytes(DriveEntry entry) =>
-      _service.fetchFileBytes(entry.path);
+      _service.fetchFileBytes(entry.path, approved: _onlyInApproved(entry));
 
   Future<void> restoreVersion(DriveEntry entry, FileVersion version) async {
     await _service.restoreVersion(

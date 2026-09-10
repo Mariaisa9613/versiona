@@ -9,6 +9,7 @@ import 'package:http/testing.dart';
 import 'package:versiona/models/drive_entry.dart';
 import 'package:versiona/models/pending_change.dart';
 import 'package:versiona/services/drive_service.dart';
+import 'package:versiona/state/drive_controller.dart';
 
 /// Un repositorio de GitHub de mentira, con las dos ramas que usa Versiona y
 /// solo los endpoints que toca el servicio.
@@ -556,6 +557,34 @@ void main() {
         ),
       );
       expect(github.requests.where((r) => r.startsWith('PUT ')), isEmpty);
+    });
+  });
+
+  group('Un fichero pendiente de eliminarse', () {
+    test('se previsualiza y se enlaza desde la versión aprobada', () async {
+      // Ya no está en la rama de trabajo: leerlo de ahí daba error en la
+      // vista previa y un 404 en "Ver en GitHub", justo cuando quien revisa
+      // necesita verlo para decidir si aprueba la baja.
+      final github = _FakeGitHub(
+        validated: {'factura.pdf': 'lo aprobado'},
+        working: const {},
+      );
+      final controller = DriveController(await _driveOn(github));
+      final entry = DriveEntry(
+        name: 'factura.pdf',
+        path: 'factura.pdf',
+        type: DriveEntryType.file,
+        pendingChange: const PendingChange(
+          path: 'factura.pdf',
+          kind: PendingChangeKind.deleted,
+        ),
+      );
+
+      expect(utf8.decode(await controller.fetchFileBytes(entry)), 'lo aprobado');
+      expect(
+        controller.webUrlFor(entry),
+        'https://github.com/o/r/blob/main/factura.pdf',
+      );
     });
   });
 }
