@@ -8,6 +8,7 @@ import '../models/file_version.dart';
 import '../state/drive_controller.dart';
 import '../utils/error_messages.dart';
 import '../widgets/review_status_badge.dart';
+import '../widgets/text_prompt_dialog.dart';
 
 class VersionHistoryScreen extends StatefulWidget {
   const VersionHistoryScreen({super.key, required this.entry});
@@ -82,45 +83,22 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
     final change = widget.entry.pendingChange;
     if (change == null) return;
 
-    final summaryController = TextEditingController();
-    final confirmed = await showDialog<bool>(
+    final summary = await showDialog<String>(
       context: context,
       builder:
-          (context) => AlertDialog(
-            title: const Text('Aprobar cambios'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Se aprobarán los cambios de "${widget.entry.name}" y '
-                  'pasarán a ser la versión oficial. El resto de cambios '
-                  'pendientes se quedan como están.',
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: summaryController,
-                  decoration: const InputDecoration(
-                    labelText: 'Resumen de la aprobación (opcional)',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('Cancelar'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('Aprobar'),
-              ),
-            ],
+          (context) => TextPromptDialog(
+            title: 'Aprobar cambios',
+            message:
+                'Se aprobarán los cambios de "${widget.entry.name}" y pasarán '
+                'a ser la versión oficial. El resto de cambios pendientes se '
+                'quedan como están.',
+            labelText: 'Resumen de la aprobación (opcional)',
+            outlined: true,
+            confirmLabel: 'Aprobar',
           ),
     );
 
-    if (confirmed != true || !mounted) return;
+    if (summary == null || !mounted) return;
 
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
@@ -129,7 +107,7 @@ class _VersionHistoryScreenState extends State<VersionHistoryScreen> {
     try {
       final results = await drive.approveChanges(
         [change],
-        summary: summaryController.text,
+        summary: summary,
       );
       if (!mounted) return;
       // Al aprobar una carpeta viene un resultado por cada fichero de

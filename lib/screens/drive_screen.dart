@@ -6,15 +6,18 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../models/drive_entry.dart';
+import '../services/drive_service.dart';
 import '../services/ticket_capture_service.dart';
 import '../services/ticket_ocr_service.dart';
 import '../state/auth_controller.dart';
 import '../state/drive_controller.dart';
 import '../utils/drive_entry_icons.dart';
 import '../utils/error_messages.dart';
+import '../utils/platform_info.dart';
 import '../utils/repo_naming.dart';
 import '../widgets/file_preview_dialog.dart';
 import '../widgets/review_status_badge.dart';
+import '../widgets/text_prompt_dialog.dart';
 import 'folder_picker_screen.dart';
 import 'version_history_screen.dart';
 
@@ -29,6 +32,16 @@ class DriveScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final notice = context.read<AuthController>().takeSignInNotice();
+    if (notice != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(notice), duration: const Duration(seconds: 8)),
+        );
+      });
+    }
+
     return ChangeNotifierProvider(
       create:
           (context) =>
@@ -202,30 +215,13 @@ class _DriveView extends StatelessWidget {
   Future<void> _createFolder(BuildContext context) async {
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
-    final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
       builder:
-          (context) => AlertDialog(
-            title: const Text('Nueva carpeta'),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'Nombre de la carpeta',
-              ),
-              onSubmitted: (v) => Navigator.of(context).pop(v),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Cancelar'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(controller.text),
-                child: const Text('Crear'),
-              ),
-            ],
+          (context) => const TextPromptDialog(
+            title: 'Nueva carpeta',
+            hintText: 'Nombre de la carpeta',
+            confirmLabel: 'Crear',
           ),
     );
 
@@ -246,27 +242,13 @@ class _DriveView extends StatelessWidget {
   Future<void> _renameEntry(BuildContext context, DriveEntry entry) async {
     final drive = context.read<DriveController>();
     final messenger = ScaffoldMessenger.of(context);
-    final controller = TextEditingController(text: entry.name);
     final newName = await showDialog<String>(
       context: context,
       builder:
-          (context) => AlertDialog(
-            title: const Text('Renombrar'),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              onSubmitted: (v) => Navigator.of(context).pop(v),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Cancelar'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(controller.text),
-                child: const Text('Renombrar'),
-              ),
-            ],
+          (context) => TextPromptDialog(
+            title: 'Renombrar',
+            initialText: entry.name,
+            confirmLabel: 'Renombrar',
           ),
     );
 
@@ -477,15 +459,17 @@ class _DriveView extends StatelessWidget {
             icon: const Icon(Icons.create_new_folder_outlined),
             label: const Text('Carpeta'),
           ),
-          const SizedBox(width: 12),
-          FloatingActionButton.extended(
-            heroTag: 'ticket',
-            onPressed: () => _captureTicket(context),
-            icon: const Icon(Icons.camera_alt_outlined),
-            label: const Text('Ticket'),
-            backgroundColor: Colors.deepPurple,
-            foregroundColor: Colors.white,
-          ),
+          if (canCaptureTicket) ...[
+            const SizedBox(width: 12),
+            FloatingActionButton.extended(
+              heroTag: 'ticket',
+              onPressed: () => _captureTicket(context),
+              icon: const Icon(Icons.camera_alt_outlined),
+              label: const Text('Ticket'),
+              backgroundColor: Colors.deepPurple,
+              foregroundColor: Colors.white,
+            ),
+          ],
           const SizedBox(width: 12),
           FloatingActionButton.extended(
             heroTag: 'upload',
@@ -693,47 +677,14 @@ class _ManageReposDialog extends StatelessWidget {
   }
 
   Future<void> _create(BuildContext context) async {
-    final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
       builder:
-          (context) => StatefulBuilder(
-            builder: (context, setState) {
-              final preview = _resolveRepoName(controller.text);
-              return AlertDialog(
-                title: const Text('Nombre del proyecto'),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    TextField(
-                      controller: controller,
-                      autofocus: true,
-                      onChanged: (_) => setState(() {}),
-                      decoration: const InputDecoration(
-                        hintText: 'p. ej. Tesorería',
-                      ),
-                      onSubmitted: (v) => Navigator.of(context).pop(v),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Se creará como "$preview".',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancelar'),
-                  ),
-                  FilledButton(
-                    onPressed: () => Navigator.of(context).pop(controller.text),
-                    child: const Text('Crear'),
-                  ),
-                ],
-              );
-            },
+          (context) => TextPromptDialog(
+            title: 'Nombre del proyecto',
+            hintText: 'p. ej. Tesorería',
+            helperFor: (text) => 'Se creará como "${_resolveRepoName(text)}".',
+            confirmLabel: 'Crear',
           ),
     );
 
@@ -756,58 +707,23 @@ class _ManageReposDialog extends StatelessWidget {
   }
 
   Future<void> _confirmDelete(BuildContext context, Repository repo) async {
-    final nameController = TextEditingController();
-    final confirmed = await showDialog<bool>(
+    final typed = await showDialog<String>(
       context: context,
       builder:
-          (context) => StatefulBuilder(
-            builder: (context, setState) {
-              final matches = nameController.text.trim() == repo.name;
-              return AlertDialog(
-                title: Text('Eliminar "${repo.name}"'),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Esto borra el repositorio de GitHub para siempre: '
-                      'todos los ficheros y su historial de versiones se '
-                      'perderán. No se puede deshacer.',
-                    ),
-                    const SizedBox(height: 16),
-                    Text('Escribe "${repo.name}" para confirmar:'),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: nameController,
-                      autofocus: true,
-                      onChanged: (_) => setState(() {}),
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                  ],
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('Cancelar'),
-                  ),
-                  FilledButton(
-                    onPressed:
-                        matches ? () => Navigator.of(context).pop(true) : null,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Theme.of(context).colorScheme.error,
-                      foregroundColor: Theme.of(context).colorScheme.onError,
-                    ),
-                    child: const Text('Eliminar definitivamente'),
-                  ),
-                ],
-              );
-            },
+          (context) => TextPromptDialog(
+            title: 'Eliminar "${repo.name}"',
+            message:
+                'Esto borra el repositorio de GitHub para siempre: todos los '
+                'ficheros y su historial de versiones se perderán. No se '
+                'puede deshacer.\n\nEscribe "${repo.name}" para confirmar:',
+            outlined: true,
+            canConfirm: (text) => text.trim() == repo.name,
+            destructive: true,
+            confirmLabel: 'Eliminar definitivamente',
           ),
     );
 
-    if (confirmed != true) return;
+    if (typed == null) return;
     if (!context.mounted) return;
 
     final messenger = ScaffoldMessenger.of(context);
@@ -940,6 +856,10 @@ class _UploadSheetState extends State<_UploadSheet> {
   PlatformFile? _file;
   bool _picking = false;
 
+  /// Por qué no se ha podido usar el último archivo elegido. Se enseña aquí
+  /// mismo: un SnackBar quedaría tapado por este mismo panel.
+  String? _error;
+
   /// Último mensaje generado automáticamente, para saber si el usuario lo
   /// ha dejado tal cual (y así poder actualizarlo si cambia de fichero) o
   /// si lo ha editado a mano (y entonces no tocarlo).
@@ -965,17 +885,24 @@ class _UploadSheetState extends State<_UploadSheet> {
         // El usuario cerró el selector sin elegir nada: no es un error.
         return;
       }
+      // Se comprueba ya, al elegirlo: si no, la subida fallaría a mitad y sin
+      // decir por qué.
+      if (picked.size > DriveService.maxUploadBytes) {
+        if (mounted) {
+          setState(() => _error = DriveService.tooLargeMessage(picked.name));
+        }
+        return;
+      }
       if (picked.bytes == null) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No se pudo leer el contenido de ese archivo.'),
-            ),
+          setState(
+            () => _error = 'No se pudo leer el contenido de ese archivo.',
           );
         }
         return;
       }
       setState(() {
+        _error = null;
         _file = picked;
         // Solo autorrellena si el usuario no ha escrito nada propio: si ya
         // hay texto que no es el mensaje automático anterior, se respeta.
@@ -1037,6 +964,13 @@ class _UploadSheetState extends State<_UploadSheet> {
               _file == null ? 'Seleccionar archivo' : 'Cambiar archivo',
             ),
           ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ],
           if (_file != null) ...[
             const SizedBox(height: 12),
             Container(
@@ -1198,8 +1132,8 @@ class _DriveBody extends StatelessWidget {
 
     // Solo tapamos la pantalla con el error de pantalla completa si además
     // no hay ninguna entrada que mostrar. Si la carga anterior sí trajo
-    // contenido válido, un fallo puntual al recargar (p. ej. justo tras
-    // subir un fichero) no debe hacerlo desaparecer de la vista.
+    // contenido válido de esta misma carpeta, un fallo puntual al recargar
+    // (p. ej. justo tras subir un fichero) no debe hacerlo desaparecer.
     if (drive.error != null && drive.entries.isEmpty) {
       return ListView(
         children: [
@@ -1210,7 +1144,23 @@ class _DriveBody extends StatelessWidget {
             color: Theme.of(context).colorScheme.error,
           ),
           const SizedBox(height: 12),
-          Center(child: Text(drive.error!)),
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(drive.error!, textAlign: TextAlign.center),
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Tirar hacia abajo para recargar no existe con ratón, así que sin
+          // este botón un fallo al abrir una carpeta dejaba la pantalla sin
+          // salida más que volver atrás.
+          Center(
+            child: FilledButton.icon(
+              onPressed: drive.load,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Reintentar'),
+            ),
+          ),
         ],
       );
     }

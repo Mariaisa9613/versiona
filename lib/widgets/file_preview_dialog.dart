@@ -457,32 +457,68 @@ class _PreviewMessage extends StatelessWidget {
 /// fichero grande no congele la vista previa (DataTable no virtualiza).
 const _maxPreviewRows = 200;
 
-class _CsvPreview extends StatelessWidget {
-  const _CsvPreview({required this.bytes});
+/// Filas de una hoja ya interpretada, o el mensaje de por qué no se ha
+/// podido.
+typedef _ParsedTable = ({List<List<dynamic>>? rows, String? problem});
 
-  final Uint8List bytes;
+/// Interpreta la hoja una sola vez y la guarda. build() se repite con cada
+/// redibujado (p.ej. al redimensionar la ventana), y volver a leer un CSV o
+/// un Excel grande cada vez se notaba.
+abstract class _TablePreviewState<T extends StatefulWidget> extends State<T> {
+  late final _ParsedTable _parsed = parse();
+
+  _ParsedTable parse();
 
   @override
   Widget build(BuildContext context) {
-    final List<List<dynamic>> rows;
-    try {
-      final text = utf8.decode(bytes, allowMalformed: true);
-      rows = const CsvToListConverter(eol: '\n').convert(text);
-    } catch (e) {
+    final rows = _parsed.rows;
+    if (rows == null) {
       return _PreviewMessage(
         icon: Icons.error_outline,
-        message: describeError(e, fallback: 'No se pudo leer este CSV.'),
+        message: _parsed.problem ?? 'No se pudo leer este fichero.',
       );
     }
     return _DataTablePreview(rows: rows);
   }
 }
 
-class _ExcelPreview extends StatelessWidget {
+class _CsvPreview extends StatefulWidget {
+  const _CsvPreview({required this.bytes});
+
+  final Uint8List bytes;
+
+  @override
+  State<_CsvPreview> createState() => _CsvPreviewState();
+}
+
+class _CsvPreviewState extends _TablePreviewState<_CsvPreview> {
+  @override
+  _ParsedTable parse() {
+    try {
+      final text = utf8.decode(widget.bytes, allowMalformed: true);
+      return (
+        rows: const CsvToListConverter(eol: '\n').convert(text),
+        problem: null,
+      );
+    } catch (e) {
+      return (
+        rows: null,
+        problem: describeError(e, fallback: 'No se pudo leer este CSV.'),
+      );
+    }
+  }
+}
+
+class _ExcelPreview extends StatefulWidget {
   const _ExcelPreview({required this.bytes});
 
   final Uint8List bytes;
 
+  @override
+  State<_ExcelPreview> createState() => _ExcelPreviewState();
+}
+
+class _ExcelPreviewState extends _TablePreviewState<_ExcelPreview> {
   String _cellText(xls.Data? cell) {
     final value = cell?.value;
     if (value == null) return '';
@@ -491,25 +527,29 @@ class _ExcelPreview extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final List<List<dynamic>> rows;
+  _ParsedTable parse() {
     try {
-      final workbook = xls.Excel.decodeBytes(bytes);
+      final workbook = xls.Excel.decodeBytes(widget.bytes);
       final sheets = workbook.tables.values;
       if (sheets.isEmpty) {
-        return const _PreviewMessage(
-          icon: Icons.table_chart_outlined,
-          message: 'Este archivo de Excel no tiene ninguna hoja con datos.',
+        return (
+          rows: null,
+          problem: 'Este archivo de Excel no tiene ninguna hoja con datos.',
         );
       }
-      rows = sheets.first.rows.map((row) => row.map(_cellText).toList()).toList();
+      return (
+        rows:
+            sheets.first.rows
+                .map((row) => row.map(_cellText).toList())
+                .toList(),
+        problem: null,
+      );
     } catch (e) {
-      return _PreviewMessage(
-        icon: Icons.error_outline,
-        message: describeError(e, fallback: 'No se pudo leer este Excel.'),
+      return (
+        rows: null,
+        problem: describeError(e, fallback: 'No se pudo leer este Excel.'),
       );
     }
-    return _DataTablePreview(rows: rows);
   }
 }
 
@@ -522,18 +562,28 @@ class _DataTablePreview extends StatelessWidget {
 
   final List<List<dynamic>> rows;
 
+  static bool _isBlank(List<dynamic> row) =>
+      row.every((cell) => cell == null || '$cell'.trim().isEmpty);
+
   @override
   Widget build(BuildContext context) {
-    if (rows.isEmpty) {
+    // Las filas vacías del principio (una línea en blanco al empezar el CSV,
+    // una hoja que no arranca en la fila 1) no sirven de cabecera, y
+    // DataTable no admite una tabla sin columnas: se caía.
+    final table = rows.skipWhile(_isBlank).toList();
+    if (table.isEmpty) {
       return const _PreviewMessage(
         icon: Icons.table_chart_outlined,
         message: 'Este fichero no tiene filas.',
       );
     }
 
-    final header = rows.first;
-    final body = rows.skip(1).take(_maxPreviewRows).toList();
-    final truncated = rows.length - 1 > _maxPreviewRows;
+    final header = table.first;
+    final body = table.skip(1).take(_maxPreviewRows).toList();
+    final truncated = table.length - 1 > _maxPreviewRows;
+    // El ancho lo marca la fila más larga: con una cabecera más corta que
+    // los datos, las columnas de más no se veían.
+    final columnCount = [header, ...body].map((r) => r.length).reduce(math.max);
 
     return Column(
       children: [
@@ -543,10 +593,10 @@ class _DataTablePreview extends StatelessWidget {
             child: SingleChildScrollView(
               child: DataTable(
                 columns: [
-                  for (final cell in header)
+                  for (var i = 0; i < columnCount; i++)
                     DataColumn(
                       label: Text(
-                        cell?.toString() ?? '',
+                        i < header.length ? (header[i]?.toString() ?? '') : '',
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -555,7 +605,7 @@ class _DataTablePreview extends StatelessWidget {
                   for (final row in body)
                     DataRow(
                       cells: [
-                        for (var i = 0; i < header.length; i++)
+                        for (var i = 0; i < columnCount; i++)
                           DataCell(
                             Text(
                               i < row.length ? (row[i]?.toString() ?? '') : '',
@@ -573,7 +623,7 @@ class _DataTablePreview extends StatelessWidget {
             padding: const EdgeInsets.all(8),
             child: Text(
               'Mostrando las primeras $_maxPreviewRows filas de '
-              '${rows.length - 1}.',
+              '${table.length - 1}.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),

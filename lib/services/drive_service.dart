@@ -7,6 +7,7 @@ import '../config/github_config.dart';
 import '../models/drive_entry.dart';
 import '../models/file_version.dart';
 import '../models/pending_change.dart';
+import '../utils/error_messages.dart';
 
 /// Resultado de aprobar o rechazar un cambio, para poder informar de éxitos
 /// parciales cuando se procesan varios de una vez.
@@ -58,10 +59,10 @@ class DriveService {
   /// algo puede haberlos cambiado.
   List<PendingChange>? _pendingCache;
 
-  /// La comparación entre las dos ramas, cacheada aparte: el listado de una
-  /// carpeta la necesita, pero no necesita el "quién y cuándo" de cada
+  /// Las diferencias entre las dos ramas, cacheadas aparte: el listado de
+  /// una carpeta las necesita, pero no necesita el "quién y cuándo" de cada
   /// cambio, que cuesta una llamada más por fichero.
-  List<CommitFile>? _comparedCache;
+  List<PendingChange>? _diffCache;
 
   static const String _workBranch = GitHubConfig.workBranchName;
 
@@ -90,6 +91,23 @@ class DriveService {
   /// no ha terminado. Pensado para mostrar contexto en la interfaz sin
   /// arriesgarse a lanzar una excepción.
   String? get repoName => _slug?.name;
+
+  /// Igual que [repoName], con el propietario delante ("usuario/repo"): es
+  /// lo que identifica de verdad a un repositorio.
+  String? get repoFullName => _slug?.fullName;
+
+  /// Tamaño máximo de un fichero que se puede subir. La API de "contents"
+  /// de GitHub rechaza lo que pasa de 100 MB, pero va mal mucho antes: el
+  /// fichero viaja entero en base64 (un tercio más grande) en una sola
+  /// petición, y en web el navegador tiene las dos copias en memoria a la
+  /// vez.
+  static const int maxUploadBytes = 25 * 1024 * 1024;
+
+  /// Por qué no se puede subir [fileName], para decirlo igual desde el
+  /// formulario de subida que desde aquí.
+  static String tooLargeMessage(String fileName) =>
+      '"$fileName" ocupa más de ${maxUploadBytes ~/ (1024 * 1024)} MB, que '
+      'es lo máximo que se puede subir.';
 
   /// Busca el repositorio de datos del usuario y lo crea si es la primera
   /// vez que conecta su cuenta. También garantiza que exista la rama de
@@ -243,16 +261,47 @@ class DriveService {
     for (var attempt = 0; ; attempt++) {
       try {
         return await action();
-      } on GitHubError {
-        if (attempt >= _retryDelays.length) rethrow;
+      } on GitHubError catch (e) {
+        // Reintentar un límite de peticiones solo lo alarga: GitHub cuenta
+        // cada intento, y el límite secundario penaliza además la insistencia.
+        if (isRateLimitError(e) || attempt >= _retryDelays.length) rethrow;
         await Future.delayed(_retryDelays[attempt]);
       }
     }
   }
 
+  /// Cuántas peticiones se lanzan a la vez como mucho. GitHub aplica un
+  /// límite "secundario" a las ráfagas: con una carpeta de cien ficheros,
+  /// lanzarlas todas juntas acababa en un 403 a mitad de la operación.
+  static const _maxConcurrentRequests = 5;
+
+  /// Aplica [action] a cada elemento de [items], con como mucho
+  /// [_maxConcurrentRequests] en vuelo a la vez, y devuelve los resultados
+  /// en el mismo orden.
+  Future<List<R>> _pooled<T, R>(
+    List<T> items,
+    Future<R> Function(T item) action,
+  ) async {
+    final results = List<R?>.filled(items.length, null);
+    var next = 0;
+    Future<void> worker() async {
+      while (next < items.length) {
+        final index = next++;
+        results[index] = await action(items[index]);
+      }
+    }
+
+    final workers =
+        items.length < _maxConcurrentRequests
+            ? items.length
+            : _maxConcurrentRequests;
+    await Future.wait([for (var i = 0; i < workers; i++) worker()]);
+    return results.cast<R>();
+  }
+
   void _invalidatePending() {
     _pendingCache = null;
-    _comparedCache = null;
+    _diffCache = null;
   }
 
   // ---------------------------------------------------------------------
@@ -414,62 +463,91 @@ class DriveService {
 
   /// Todo lo que está pendiente de aprobación en el espacio.
   ///
-  /// Sale de **una** comparación entre la versión aprobada y la de trabajo.
-  /// El "quién y cuándo" de cada fichero se consulta aparte (la comparación
-  /// no lo trae por fichero), en paralelo y solo para lo que ha cambiado.
+  /// Sale de comparar los ficheros de las dos ramas ([_diff]). El "quién y
+  /// cuándo" de cada fichero se consulta aparte (la comparación no lo trae
+  /// por fichero), unos pocos a la vez y solo para lo que ha cambiado.
   Future<List<PendingChange>> pendingChanges({bool forceRefresh = false}) async {
     final cached = _pendingCache;
     if (!forceRefresh && cached != null) return cached;
 
-    final changes = PendingChange.fromComparison(
-      await _comparedFiles(forceRefresh: forceRefresh),
-    );
-    final detailed = await Future.wait(
-      changes.map((change) async {
-        try {
-          final commits =
-              await _github.repositories
-                  .listCommits(slug, path: change.path, sha: _workBranch)
-                  .take(20)
-                  .toList();
-          return change.withHistory(commits);
-        } catch (_) {
-          return change;
-        }
-      }),
-    );
+    final changes = await _diff(forceRefresh: forceRefresh);
+    final detailed = await _pooled(changes, (change) async {
+      try {
+        final commits =
+            await _github.repositories
+                .listCommits(slug, path: change.path, sha: _workBranch)
+                .take(20)
+                .toList();
+        return change.withHistory(commits);
+      } catch (_) {
+        return change;
+      }
+    });
 
     _pendingCache = detailed;
     return detailed;
   }
 
-  /// Los ficheros que difieren entre la versión aprobada y la de trabajo, tal
-  /// y como los ve GitHub. Es **una** llamada, y de aquí sale tanto la lista
-  /// de cambios pendientes como qué está pendiente de borrarse.
-  Future<List<CommitFile>> _comparedFiles({bool forceRefresh = false}) async {
-    final cached = _comparedCache;
+  /// En qué se diferencian ahora mismo la versión aprobada y la de trabajo.
+  /// Son **dos** llamadas (el árbol de cada rama), y de aquí sale tanto la
+  /// lista de cambios pendientes como qué está pendiente de borrarse.
+  ///
+  /// No se usa la API de comparación de GitHub a propósito: mide contra la
+  /// base de fusión de las dos ramas, y aprobar no fusiona nada, así que esa
+  /// base se quedaba congelada en el punto en el que se separaron. Ver
+  /// [PendingChange.fromTrees].
+  Future<List<PendingChange>> _diff({bool forceRefresh = false}) async {
+    final cached = _diffCache;
     if (!forceRefresh && cached != null) return cached;
 
     try {
-      final comparison = await _github.repositories.compareCommits(
-        slug,
-        _validatedBranch,
-        _workBranch,
+      final [approved, working] = await Future.wait([
+        _blobsOf(_validatedBranch),
+        _blobsOf(_workBranch),
+      ]);
+      final changes = PendingChange.fromTrees(
+        approved: approved,
+        working: working,
       );
-      // Fuera el fichero interno que mantiene vivas las carpetas vacías: no
-      // es un cambio que nadie tenga que revisar (ni siquiera se ve), pero
-      // contaba como pendiente y llegaba a bloquear el borrado de una carpeta
-      // recién creada, sin forma de desbloquearlo.
-      final files =
-          (comparison.files ?? const <CommitFile>[])
-              .where((f) => !_isFolderKeepFile(f.name))
-              .toList();
-      _comparedCache = files;
-      return files;
+      _diffCache = changes;
+      return changes;
     } on GitHubError catch (e) {
       debugPrint('[Versiona] No se pudo comparar las ramas: ${e.message}');
       return const [];
     }
+  }
+
+  /// Todos los ficheros de [ref], de ruta al sha de su contenido. Dos rutas
+  /// con el mismo sha guardan exactamente lo mismo.
+  ///
+  /// Se pide el árbol completo de una vez (`recursive=1`) en lugar de
+  /// recorrer carpeta a carpeta: es una sola llamada para todo el espacio.
+  Future<Map<String, String>> _blobsOf(String ref) async {
+    final tip = await _branchTipSha(ref);
+    if (tip == null) return const {};
+
+    final tree = await _github.git.getTree(slug, tip, recursive: true);
+    if (tree.truncated == true) {
+      // Solo pasa en espacios enormes (decenas de miles de ficheros). Con el
+      // árbol incompleto, lo que falte parecería borrado, así que es mejor
+      // no marcar nada que marcar bajas que nadie ha pedido.
+      throw StateError(
+        'Este espacio tiene demasiados ficheros para revisarlos de una vez.',
+      );
+    }
+
+    return {
+      for (final entry in tree.entries ?? const <GitTreeEntry>[])
+        // Fuera el fichero interno que mantiene vivas las carpetas vacías:
+        // no es un cambio que nadie tenga que revisar (ni siquiera se ve),
+        // pero contaba como pendiente y llegaba a bloquear el borrado de una
+        // carpeta recién creada, sin forma de desbloquearlo.
+        if (entry.type == 'blob' &&
+            entry.path != null &&
+            entry.sha != null &&
+            !_isFolderKeepFile(entry.path))
+          entry.path!: entry.sha!,
+    };
   }
 
   bool _isFolderKeepFile(String? path) =>
@@ -477,11 +555,12 @@ class DriveService {
       (path == GitHubConfig.folderKeepFile ||
           path.endsWith('/${GitHubConfig.folderKeepFile}'));
 
-  /// Rutas que la comparación da por eliminadas en la rama de trabajo.
+  /// Rutas que están en la versión aprobada y ya no en la de trabajo: bajas
+  /// pendientes de aprobarse.
   Future<Set<String>> _removedPaths({bool forceRefresh = false}) async {
     return {
-      for (final file in await _comparedFiles(forceRefresh: forceRefresh))
-        if (file.status == 'removed' && file.name != null) file.name!,
+      for (final change in await _diff(forceRefresh: forceRefresh))
+        if (change.kind == PendingChangeKind.deleted) change.path,
     };
   }
 
@@ -528,6 +607,9 @@ class DriveService {
     required List<int> bytes,
     String? commitMessage,
   }) async {
+    if (bytes.length > maxUploadBytes) {
+      throw StateError(tooLargeMessage(fileName));
+    }
     final path = _joinPath(folderPath, fileName);
     final content = base64Encode(bytes);
 
@@ -659,6 +741,23 @@ class DriveService {
     }
   }
 
+  /// Si hay algo (fichero o carpeta) en [path] dentro de [ref].
+  ///
+  /// A diferencia de [_fileAt], un fallo que no sea "no existe" se propaga:
+  /// quien pregunta esto va a escribir ahí, y dar por libre una ruta que no
+  /// se ha podido comprobar es justo lo que se quiere evitar.
+  Future<bool> _existsAt(String path, String ref) async {
+    try {
+      await _github.repositories.getContents(slug, path, ref: ref);
+      return true;
+    } on GitHubError catch (e) {
+      // getContents() no conserva el código HTTP: un 404 llega como un
+      // GitHubError con el mensaje de la API.
+      if (e is NotFound || e.message == 'Not Found') return false;
+      rethrow;
+    }
+  }
+
   /// Crea una carpeta vacía mediante un fichero "placeholder" invisible para
   /// el usuario (Git no versiona carpetas vacías).
   Future<DriveEntry> createFolder({
@@ -768,9 +867,14 @@ class DriveService {
 
   /// Contenido en bruto de [path] para poder previsualizarlo (imagen, PDF,
   /// hoja de cálculo...) sin necesidad de descargarlo primero.
-  Future<Uint8List> fetchFileBytes(String path) async {
+  ///
+  /// Con [approved] se lee de la versión aprobada: es lo que toca con un
+  /// fichero pendiente de eliminarse, que ya no está en la rama de trabajo
+  /// pero es justo cuando quien revisa necesita verlo para decidir.
+  Future<Uint8List> fetchFileBytes(String path, {bool approved = false}) async {
+    final ref = approved ? _validatedBranch : _workBranch;
     final contents = await _withRetry(
-      () => _github.repositories.getContents(slug, path, ref: _workBranch),
+      () => _github.repositories.getContents(slug, path, ref: ref),
     );
     final file = contents.file;
     if (file == null) {
@@ -822,8 +926,10 @@ class DriveService {
   }
 
   /// Enlace a la vista de GitHub para inspeccionar un fichero en detalle.
-  String webUrlFor(String path) =>
-      'https://github.com/${slug.fullName}/blob/$_workBranch/$path';
+  /// [approved] como en [fetchFileBytes].
+  String webUrlFor(String path, {bool approved = false}) =>
+      'https://github.com/${slug.fullName}/blob/'
+      '${approved ? _validatedBranch : _workBranch}/$path';
 
   /// Cambia el nombre de [entry] manteniéndolo en la misma carpeta.
   Future<DriveEntry> rename({
@@ -879,6 +985,14 @@ class DriveService {
     if (newPath == entry.path) return entry;
     if (entry.isFolder) await _assertNoPendingInside(entry.path);
 
+    // Antes de tocar nada: GitHub no deja crear un fichero donde ya hay otro,
+    // así que con el destino ocupado la copia fallaba a mitad, con parte de
+    // los ficheros ya duplicados y ninguno de los originales borrado.
+    if (await _existsAt(newPath, _workBranch)) {
+      final name = newPath.substring(newPath.lastIndexOf('/') + 1);
+      throw StateError('Ya existe "$name" en esa carpeta.');
+    }
+
     final files =
         entry.isFolder
             ? await _collectFilesRecursively(entry.path, ref: _workBranch)
@@ -889,18 +1003,17 @@ class DriveService {
       throw StateError('No se pudo leer lo que se quiere mover.');
     }
 
-    // Las lecturas van en paralelo (son GET independientes). Las escrituras,
-    // una detrás de otra: la API de "contents" crea un commit por llamada
-    // desde la punta de la rama y varias a la vez se pisan. Primero se crean
-    // las copias nuevas y solo después se borran los originales, para no
-    // perder datos si algo falla a mitad.
-    final contents = await Future.wait(
-      files.map(
-        (file) => _github.repositories.getContents(
-          slug,
-          file.path!,
-          ref: _workBranch,
-        ),
+    // Las lecturas van unas pocas a la vez (son GET independientes). Las
+    // escrituras, una detrás de otra: la API de "contents" crea un commit por
+    // llamada desde la punta de la rama y varias a la vez se pisan. Primero
+    // se crean las copias nuevas y solo después se borran los originales,
+    // para no perder datos si algo falla a mitad.
+    final contents = await _pooled(
+      files,
+      (file) => _github.repositories.getContents(
+        slug,
+        file.path!,
+        ref: _workBranch,
       ),
     );
 
@@ -953,6 +1066,37 @@ class DriveService {
   // Aprobar / rechazar
   // ---------------------------------------------------------------------
 
+  /// Sustituye cada carpeta de [changes] por los cambios que tiene dentro,
+  /// que es lo único que se sabe aprobar o rechazar: un fichero.
+  ///
+  /// Una carpeta puede llegar aquí porque en la lista se ve la carpeta, no
+  /// sus ficheros (p.ej. al borrarla entera). Sin esto, aprobarla acababa en
+  /// [_publish] con una ruta que no es ningún fichero, no se escribía nada y
+  /// aun así se informaba de que había ido bien: la carpeta desaparecía de
+  /// la vista y volvía a aparecer en la siguiente recarga.
+  Future<List<PendingChange>> _expandAll(List<PendingChange> changes) async {
+    final pending = await pendingChanges();
+    final expanded = <String, PendingChange>{};
+
+    for (final change in changes) {
+      final inside =
+          pending.where((c) => c.path.startsWith('${change.path}/')).toList();
+      if (inside.isEmpty) {
+        expanded[change.path] = change;
+        continue;
+      }
+      debugPrint(
+        '[Versiona] "${change.path}" es una carpeta: se resuelven los '
+        '${inside.length} cambios que tiene dentro.',
+      );
+      for (final child in inside) {
+        expanded[child.path] = child;
+      }
+    }
+
+    return expanded.values.toList();
+  }
+
   /// Aprueba [changes]: lleva cada fichero a la versión aprobada tal y como
   /// está en la rama de trabajo, o lo borra allí si lo pendiente era una baja.
   ///
@@ -967,7 +1111,7 @@ class DriveService {
     final hasSummary = summary != null && summary.trim().isNotEmpty;
     final results = <ChangeResult>[];
 
-    for (final change in changes) {
+    for (final change in await _expandAll(changes)) {
       try {
         final message =
             hasSummary
@@ -993,7 +1137,10 @@ class DriveService {
     ]);
 
     if (change.kind == PendingChangeKind.deleted) {
-      if (approved?.sha == null) return; // Ya no estaba: nada que hacer.
+      if (approved?.sha == null) {
+        await _assertResolvesToFile(change);
+        return; // Ya no estaba: nada que hacer.
+      }
       await _github.repositories.deleteFile(
         slug,
         change.path,
@@ -1022,7 +1169,7 @@ class DriveService {
   /// aprobada, o lo quita de la rama de trabajo si nunca llegó a aprobarse.
   Future<List<ChangeResult>> rejectChanges(List<PendingChange> changes) async {
     final results = <ChangeResult>[];
-    for (final change in changes) {
+    for (final change in await _expandAll(changes)) {
       try {
         await _revert(change);
         results.add(ChangeResult(change));
@@ -1043,7 +1190,10 @@ class DriveService {
 
     // Nunca se aprobó: rechazarlo es quitarlo de la rama de trabajo.
     if (approved == null) {
-      if (working?.sha == null) return;
+      if (working?.sha == null) {
+        await _assertResolvesToFile(change);
+        return;
+      }
       await _github.repositories.deleteFile(
         slug,
         change.path,
@@ -1074,6 +1224,24 @@ class DriveService {
       branch: _workBranch,
       sha: working!.sha,
     );
+  }
+
+  /// Comprueba que [change] sea de verdad un fichero que ya no está en
+  /// ninguna de las dos ramas, y no una carpeta que se ha colado hasta aquí.
+  ///
+  /// Aprobar o rechazar una carpeta se resuelve antes, en [_expandAll], así
+  /// que llegar aquí con una es un error: sin esta comprobación, [_fileAt]
+  /// devolvía `null` para un directorio y el cambio se daba por resuelto sin
+  /// haber escrito nada.
+  Future<void> _assertResolvesToFile(PendingChange change) async {
+    for (final ref in [_validatedBranch, _workBranch]) {
+      if ((await _treeOf(change.path, ref)).isNotEmpty) {
+        throw StateError(
+          '"${change.name}" es una carpeta, no un fichero: aprueba o rechaza '
+          'lo que tiene dentro.',
+        );
+      }
+    }
   }
 
   /// Motivo legible de un fallo, sin el "Bad state:" que antepone Dart.

@@ -78,6 +78,25 @@ class GitHubDeviceAuthService {
   static const _deviceCodeUrl = 'https://github.com/login/device/code';
   static const _tokenUrl = 'https://github.com/login/oauth/access_token';
 
+  /// El cuerpo JSON de una respuesta de GitHub.
+  ///
+  /// Lanza [DeviceAuthException] si no llega JSON: un 5xx de GitHub responde
+  /// con una página HTML, y un portal cautivo o un proxy pueden devolver
+  /// cualquier cosa. Sin esto, `jsonDecode` lanzaba una `FormatException`
+  /// cruda desde dentro del sondeo, donde nadie la esperaba.
+  Map<String, dynamic> _decodeBody(http.Response response) {
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) return decoded;
+    } on FormatException {
+      // Cae al throw de abajo, igual que un JSON que no sea un objeto.
+    }
+    throw DeviceAuthException(
+      'GitHub ha respondido de forma inesperada '
+      '(HTTP ${response.statusCode}).',
+    );
+  }
+
   Future<DeviceCodeRequest> requestDeviceCode() async {
     final response = await _client.post(
       Uri.parse(_deviceCodeUrl),
@@ -88,7 +107,7 @@ class GitHubDeviceAuthService {
       },
     );
 
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final body = _decodeBody(response);
     if (response.statusCode != 200 || body.containsKey('error')) {
       throw DeviceAuthException(
         body['error_description'] as String? ??
@@ -121,11 +140,17 @@ class GitHubDeviceAuthService {
       },
     );
 
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final body = _decodeBody(response);
     final error = body['error'] as String?;
 
     if (error == null) {
-      return DevicePollResult.success(body['access_token'] as String);
+      final token = body['access_token'] as String?;
+      if (token == null || token.isEmpty) {
+        throw DeviceAuthException(
+          'GitHub ha aceptado el código pero no ha devuelto ningún token.',
+        );
+      }
+      return DevicePollResult.success(token);
     }
 
     switch (error) {

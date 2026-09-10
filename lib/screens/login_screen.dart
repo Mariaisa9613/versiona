@@ -157,13 +157,34 @@ class _WelcomeCard extends StatelessWidget {
           ),
           const SizedBox(height: 16),
         ],
-        FilledButton.icon(
-          onPressed:
-              isGitHubLoginSupportedOnThisPlatform ? auth.startSignIn : null,
-          icon: const Icon(Icons.arrow_forward),
-          label: const Text('Continuar con GitHub'),
-          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
-        ),
+        // Tras un fallo pasajero (GitHub caído, sin conexión) la sesión
+        // guardada sigue valiendo: reintentar con ella evita repetir el
+        // inicio de sesión entero por una incidencia de unos minutos.
+        if (auth.canRetrySavedSession) ...[
+          FilledButton.icon(
+            onPressed: auth.retrySavedSession,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Reintentar'),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed:
+                isGitHubLoginSupportedOnThisPlatform ? auth.startSignIn : null,
+            child: const Text('Conectar otra cuenta de GitHub'),
+          ),
+        ] else
+          FilledButton.icon(
+            onPressed:
+                isGitHubLoginSupportedOnThisPlatform ? auth.startSignIn : null,
+            icon: const Icon(Icons.arrow_forward),
+            label: const Text('Continuar con GitHub'),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+            ),
+          ),
       ],
     );
   }
