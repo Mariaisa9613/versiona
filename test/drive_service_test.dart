@@ -587,4 +587,54 @@ void main() {
       );
     });
   });
+
+  group('Ráfagas de peticiones', () {
+    final many = {for (var i = 0; i < 30; i++) 'F/$i.pdf': 'contenido $i'};
+
+    test('mover una carpeta grande no lanza todas las lecturas a la vez',
+        () async {
+      final github = _FakeGitHub(validated: many, working: many);
+      final drive = await _driveOn(github);
+
+      await drive.move(
+        entry: DriveEntry(
+          name: 'F',
+          path: 'F',
+          type: DriveEntryType.folder,
+        ),
+        destinationFolderPath: 'Destino',
+      );
+
+      expect(github.working, hasLength(30));
+      expect(github.working.keys, everyElement(startsWith('Destino/F/')));
+      expect(github.maxInFlight, lessThanOrEqualTo(5));
+    });
+
+    test('el detalle de muchos cambios pendientes tampoco', () async {
+      final github = _FakeGitHub(working: many);
+      final drive = await _driveOn(github);
+
+      expect(await drive.pendingChanges(), hasLength(30));
+      expect(github.maxInFlight, lessThanOrEqualTo(5));
+    });
+
+    test('un límite de peticiones no se reintenta', () async {
+      final github = _FakeGitHub(
+        validated: {'a.pdf': 'x'},
+        working: {'a.pdf': 'x'},
+      );
+      final drive = await _driveOn(github);
+      github.rateLimited = (r) => r.url.path.endsWith('/contents/a.pdf');
+
+      await expectLater(
+        drive.fetchFileBytes('a.pdf'),
+        throwsA(isA<GitHubError>()),
+      );
+      // Reintentarlo solo sumaba peticiones a un límite ya superado.
+      expect(
+        github.requests.where((r) => r == 'GET /repos/o/r/contents/a.pdf'),
+        hasLength(1),
+      );
+    });
+  });
 }

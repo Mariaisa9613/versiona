@@ -7,6 +7,7 @@ import '../config/github_config.dart';
 import '../models/drive_entry.dart';
 import '../models/file_version.dart';
 import '../models/pending_change.dart';
+import '../utils/error_messages.dart';
 
 /// Resultado de aprobar o rechazar un cambio, para poder informar de éxitos
 /// parciales cuando se procesan varios de una vez.
@@ -260,11 +261,42 @@ class DriveService {
     for (var attempt = 0; ; attempt++) {
       try {
         return await action();
-      } on GitHubError {
-        if (attempt >= _retryDelays.length) rethrow;
+      } on GitHubError catch (e) {
+        // Reintentar un límite de peticiones solo lo alarga: GitHub cuenta
+        // cada intento, y el límite secundario penaliza además la insistencia.
+        if (isRateLimitError(e) || attempt >= _retryDelays.length) rethrow;
         await Future.delayed(_retryDelays[attempt]);
       }
     }
+  }
+
+  /// Cuántas peticiones se lanzan a la vez como mucho. GitHub aplica un
+  /// límite "secundario" a las ráfagas: con una carpeta de cien ficheros,
+  /// lanzarlas todas juntas acababa en un 403 a mitad de la operación.
+  static const _maxConcurrentRequests = 5;
+
+  /// Aplica [action] a cada elemento de [items], con como mucho
+  /// [_maxConcurrentRequests] en vuelo a la vez, y devuelve los resultados
+  /// en el mismo orden.
+  Future<List<R>> _pooled<T, R>(
+    List<T> items,
+    Future<R> Function(T item) action,
+  ) async {
+    final results = List<R?>.filled(items.length, null);
+    var next = 0;
+    Future<void> worker() async {
+      while (next < items.length) {
+        final index = next++;
+        results[index] = await action(items[index]);
+      }
+    }
+
+    final workers =
+        items.length < _maxConcurrentRequests
+            ? items.length
+            : _maxConcurrentRequests;
+    await Future.wait([for (var i = 0; i < workers; i++) worker()]);
+    return results.cast<R>();
   }
 
   void _invalidatePending() {
@@ -433,26 +465,24 @@ class DriveService {
   ///
   /// Sale de comparar los ficheros de las dos ramas ([_diff]). El "quién y
   /// cuándo" de cada fichero se consulta aparte (la comparación no lo trae
-  /// por fichero), en paralelo y solo para lo que ha cambiado.
+  /// por fichero), unos pocos a la vez y solo para lo que ha cambiado.
   Future<List<PendingChange>> pendingChanges({bool forceRefresh = false}) async {
     final cached = _pendingCache;
     if (!forceRefresh && cached != null) return cached;
 
     final changes = await _diff(forceRefresh: forceRefresh);
-    final detailed = await Future.wait(
-      changes.map((change) async {
-        try {
-          final commits =
-              await _github.repositories
-                  .listCommits(slug, path: change.path, sha: _workBranch)
-                  .take(20)
-                  .toList();
-          return change.withHistory(commits);
-        } catch (_) {
-          return change;
-        }
-      }),
-    );
+    final detailed = await _pooled(changes, (change) async {
+      try {
+        final commits =
+            await _github.repositories
+                .listCommits(slug, path: change.path, sha: _workBranch)
+                .take(20)
+                .toList();
+        return change.withHistory(commits);
+      } catch (_) {
+        return change;
+      }
+    });
 
     _pendingCache = detailed;
     return detailed;
@@ -973,18 +1003,17 @@ class DriveService {
       throw StateError('No se pudo leer lo que se quiere mover.');
     }
 
-    // Las lecturas van en paralelo (son GET independientes). Las escrituras,
-    // una detrás de otra: la API de "contents" crea un commit por llamada
-    // desde la punta de la rama y varias a la vez se pisan. Primero se crean
-    // las copias nuevas y solo después se borran los originales, para no
-    // perder datos si algo falla a mitad.
-    final contents = await Future.wait(
-      files.map(
-        (file) => _github.repositories.getContents(
-          slug,
-          file.path!,
-          ref: _workBranch,
-        ),
+    // Las lecturas van unas pocas a la vez (son GET independientes). Las
+    // escrituras, una detrás de otra: la API de "contents" crea un commit por
+    // llamada desde la punta de la rama y varias a la vez se pisan. Primero
+    // se crean las copias nuevas y solo después se borran los originales,
+    // para no perder datos si algo falla a mitad.
+    final contents = await _pooled(
+      files,
+      (file) => _github.repositories.getContents(
+        slug,
+        file.path!,
+        ref: _workBranch,
       ),
     );
 
