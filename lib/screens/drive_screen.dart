@@ -13,6 +13,7 @@ import '../state/auth_controller.dart';
 import '../state/drive_controller.dart';
 import '../utils/drive_entry_icons.dart';
 import '../utils/error_messages.dart';
+import '../utils/platform_info.dart';
 import '../utils/repo_naming.dart';
 import '../widgets/file_preview_dialog.dart';
 import '../widgets/review_status_badge.dart';
@@ -458,15 +459,17 @@ class _DriveView extends StatelessWidget {
             icon: const Icon(Icons.create_new_folder_outlined),
             label: const Text('Carpeta'),
           ),
-          const SizedBox(width: 12),
-          FloatingActionButton.extended(
-            heroTag: 'ticket',
-            onPressed: () => _captureTicket(context),
-            icon: const Icon(Icons.camera_alt_outlined),
-            label: const Text('Ticket'),
-            backgroundColor: Colors.deepPurple,
-            foregroundColor: Colors.white,
-          ),
+          if (canCaptureTicket) ...[
+            const SizedBox(width: 12),
+            FloatingActionButton.extended(
+              heroTag: 'ticket',
+              onPressed: () => _captureTicket(context),
+              icon: const Icon(Icons.camera_alt_outlined),
+              label: const Text('Ticket'),
+              backgroundColor: Colors.deepPurple,
+              foregroundColor: Colors.white,
+            ),
+          ],
           const SizedBox(width: 12),
           FloatingActionButton.extended(
             heroTag: 'upload',
